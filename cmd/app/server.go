@@ -30,10 +30,9 @@ import (
 
 	"github.com/caoyingjunz/pixiu/api/server/router"
 	"github.com/caoyingjunz/pixiu/cmd/app/options"
-	"github.com/caoyingjunz/pixiu/pkg/pixiu"
 )
 
-func NewServerCommand() *cobra.Command {
+func NewServerCommand(version string) *cobra.Command {
 	opts, err := options.NewOptions()
 	if err != nil {
 		klog.Fatalf("unable to initialize command options: %v", err)
@@ -68,42 +67,34 @@ func NewServerCommand() *cobra.Command {
 
 	// 绑定命令行参数
 	opts.BindFlags(cmd)
+
+	verCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the version",
+		Long:  "Print version and exit.",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(version)
+		},
+	}
+	cmd.AddCommand(verCmd)
 	return cmd
 }
 
+// Run 优雅启动貔貅服务
 func Run(opt *options.Options) error {
-	// 设置核心应用接口
-	pixiu.Setup(opt)
-
-	// 初始化 APIs 路由
-	router.InstallRouters(opt)
-
-	// 启动优雅服务
-	runServer(opt)
-	return nil
-}
-
-func runBootstrap(ctx context.Context, stopCh chan struct{}) {
-	// 加载已经存在 cloud 客户端
-	if err := pixiu.CoreV1.Cloud().Restore(ctx); err != nil {
-		klog.Fatal("failed to load cloud driver: ", err)
-	}
-	pixiu.CoreV1.Cloud().SyncStatus(ctx, stopCh)
-
-	// 启动审计事件的清理任务
-	pixiu.CoreV1.Audit().Run(stopCh)
-}
-
-// 优雅启动貔貅服务
-func runServer(opt *options.Options) {
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", opt.ComponentConfig.Default.Listen),
-		Handler: opt.GinEngine,
+		Handler: opt.HttpEngine,
 	}
-	stopCh := make(chan struct{})
 
-	// 启动初始化任务
-	runBootstrap(context.TODO(), stopCh)
+	// 启动部署计划
+	// TODO: 暂未设置优雅退出
+	if err := opt.Controller.Plan().Run(context.TODO(), 5); err != nil {
+		klog.Fatal("failed to listen pixiu server: ", err)
+	}
+	// 安装 http 路由
+	router.InstallRouters(opt)
+
 	// Initializing the server in a goroutine so that it won't block the graceful shutdown handling below
 	go func() {
 		klog.Infof("starting pixiu server")
@@ -117,14 +108,14 @@ func runServer(opt *options.Options) {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	klog.Infof("shutting pixiu server down ...")
-	stopCh <- struct{}{}
 
 	// The context is used to inform the server it has 5 seconds to finish the request
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		klog.Fatal("pixiu server forced to shutdown: ", err)
+		klog.Fatalf("pixiu server forced to shutdown: %v", err)
 	}
-	klog.Infof("pixiu server exit successful")
+
+	return nil
 }

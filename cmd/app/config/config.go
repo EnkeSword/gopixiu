@@ -16,27 +16,42 @@ limitations under the License.
 
 package config
 
-import (
-	"fmt"
-	"strings"
+import "errors"
 
-	"github.com/caoyingjunz/pixiu/pkg/types"
+type LogFormat string
+
+const (
+	LogFormatJson LogFormat = "json"
+	LogFormatText LogFormat = "text"
 )
+
+var ErrInvalidLogFormat = errors.New("invalid log format")
 
 type Config struct {
 	Default DefaultOptions `yaml:"default"`
 	Mysql   MysqlOptions   `yaml:"mysql"`
-	Cicd    CicdOptions    `yaml:"cicd"`
+	Worker  WorkerOptions  `yaml:"worker"`
 }
 
 type DefaultOptions struct {
-	Listen   int    `yaml:"listen"`
-	LogType  string `yaml:"log_type"`
-	LogDir   string `yaml:"log_dir"`
-	LogLevel string `yaml:"log_level"`
-	JWTKey   string `yaml:"jwt_key"`
+	Mode   string `yaml:"mode"`
+	Listen int    `yaml:"listen"`
+	JWTKey string `yaml:"jwt_key"`
+
+	// 自动创建指定模型的数据库表结构，不会更新已存在的数据库表
+	AutoMigrate bool `yaml:"auto_migrate"`
+
+	LogOptions `yaml:",inline"`
 }
 
+func (o DefaultOptions) Valid() error {
+	if err := o.LogOptions.Valid(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MysqlOptions 数据库具体配置
 type MysqlOptions struct {
 	Host     string `yaml:"host"`
 	User     string `yaml:"user"`
@@ -45,34 +60,49 @@ type MysqlOptions struct {
 	Name     string `yaml:"name"`
 }
 
-type CicdOptions struct {
-	Enable  bool            `yaml:"enable"`
-	Driver  string          `yaml:"driver"`
-	Jenkins *JenkinsOptions `yaml:"jenkins"`
-}
-
-type JenkinsOptions struct {
-	Host     string `yaml:"host"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-}
-
-func (c *Config) Valid() error {
-	if strings.ToLower(c.Default.LogType) == "file" {
-		if len(c.Default.LogDir) == 0 {
-			return fmt.Errorf("log_dir should be config when log type is file")
-		}
-	}
-
-	switch c.Cicd.Driver {
-	case "", types.Jenkins:
-		j := c.Cicd.Jenkins
-		if j == nil {
-			return fmt.Errorf("jenkins config option missing")
-		}
-	default:
-		return fmt.Errorf("unsupported cicd type %s", c.Cicd.Driver)
-	}
-
+func (o MysqlOptions) Valid() error {
+	// TODO
 	return nil
+}
+
+type LogOptions struct {
+	LogFormat `yaml:"log_format"`
+}
+
+func (o LogOptions) Valid() error {
+	switch o.LogFormat {
+	case LogFormatJson, LogFormatText:
+		return nil
+	default:
+		return ErrInvalidLogFormat
+	}
+}
+
+type WorkerOptions struct {
+	WorkDir string   `yaml:"work_dir"`
+	Engines []Engine `yaml:"engines"`
+}
+
+type Engine struct {
+	Image       string   `yaml:"image"`
+	OSSupported []string `yaml:"os_supported"`
+}
+
+func (w WorkerOptions) Valid() error {
+	// TODO
+	return nil
+}
+
+func (c *Config) Valid() (err error) {
+	if err = c.Default.Valid(); err != nil {
+		return
+	}
+	if err = c.Mysql.Valid(); err != nil {
+		return
+	}
+	if err = c.Worker.Valid(); err != nil {
+		return
+	}
+
+	return
 }

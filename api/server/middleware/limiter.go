@@ -25,7 +25,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/caoyingjunz/pixiu/api/server/httputils"
-	"github.com/caoyingjunz/pixiu/pkg/errors"
+	"github.com/caoyingjunz/pixiu/pkg/util/errors"
 	"github.com/caoyingjunz/pixiu/pkg/util/lru"
 )
 
@@ -38,11 +38,9 @@ const (
 // UserRateLimiter 针对每个用户的请求进行限速
 // TODO 限速大小从配置中读取
 func UserRateLimiter() gin.HandlerFunc {
-	// 初始化一个 LRU Cache
-	cache, _ := lru.NewLRUCache(cap)
+	cache := lru.NewLRUCache(cap)
 
 	return func(c *gin.Context) {
-		// 把 key: clientIP value: *ratelimit.Bucket 存入 LRU Cache 中
 		clientIP := c.ClientIP()
 		if !cache.Contains(clientIP) {
 			cache.Add(clientIP, ratelimit.NewBucketWithQuantum(time.Second, capacity, quantum))

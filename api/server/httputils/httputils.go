@@ -17,9 +17,15 @@ limitations under the License.
 package httputils
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
+
+	"github.com/caoyingjunz/pixiu/api/server/errors"
+	validatorutil "github.com/caoyingjunz/pixiu/api/server/validator"
 )
 
 type Response struct {
@@ -71,12 +77,24 @@ func SetSuccess(c *gin.Context, r *Response) {
 
 // SetFailed 设置错误返回值
 func SetFailed(c *gin.Context, r *Response, err error) {
-	SetFailedWithCode(c, r, http.StatusBadRequest, err)
+	switch e := err.(type) {
+	case errors.Error:
+		SetFailedWithCode(c, r, e.Code, e)
+	case validator.ValidationErrors:
+		SetFailedWithValidationError(c, r, validatorutil.TranslateError(e))
+	default:
+		SetFailedWithCode(c, r, http.StatusBadRequest, err)
+	}
 }
 
 // SetFailedWithCode 设置错误返回值
 func SetFailedWithCode(c *gin.Context, r *Response, code int, err error) {
 	r.SetMessageWithCode(err, code)
+	c.JSON(http.StatusOK, r)
+}
+
+func SetFailedWithValidationError(c *gin.Context, r *Response, e string) {
+	r.SetMessageWithCode(e, http.StatusBadRequest)
 	c.JSON(http.StatusOK, r)
 }
 
@@ -86,4 +104,37 @@ func AbortFailedWithCode(c *gin.Context, code int, err error) {
 	r.SetMessageWithCode(err, code)
 	c.JSON(http.StatusOK, r)
 	c.Abort()
+}
+
+func ShouldBindAny(c *gin.Context, jsonObject interface{}, uriObject interface{}, queryObject interface{}) error {
+	var err error
+	if jsonObject != nil {
+		if err = c.ShouldBindJSON(jsonObject); err != nil {
+			return err
+		}
+	}
+	if uriObject != nil {
+		if err = c.ShouldBindUri(uriObject); err != nil {
+			return err
+		}
+	}
+	if queryObject != nil {
+		if err = c.ShouldBindQuery(queryObject); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func GetUserIdFromRequest(ctx context.Context) (int64, error) {
+	val := ctx.Value("userId")
+	if val == nil {
+		return 0, fmt.Errorf("get nil userId")
+	}
+
+	userId, ok := val.(int64)
+	if !ok {
+		return 0, fmt.Errorf("invalid userId")
+	}
+	return userId, nil
 }

@@ -24,31 +24,51 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/caoyingjunz/pixiu/api/server/httputils"
-	"github.com/caoyingjunz/pixiu/pkg/pixiu"
-	"github.com/caoyingjunz/pixiu/pkg/types"
+	"github.com/caoyingjunz/pixiu/cmd/app/options"
+	tokenutil "github.com/caoyingjunz/pixiu/pkg/util/token"
 )
 
 // Authentication 身份认证
-func Authentication() gin.HandlerFunc {
+func Authentication(o *options.Options) gin.HandlerFunc {
+	keyBytes := []byte(o.ComponentConfig.Default.JWTKey)
+
 	return func(c *gin.Context) {
-		if AlwaysAllowPath.Has(c.Request.URL.Path) {
+		if alwaysAllowPath.Has(c.Request.URL.Path) || allowCustomRequest(c) {
 			return
 		}
 
-		token, err := extractToken(c, c.Request.URL.Path == types.WebShellURL)
-		if err != nil {
-			httputils.AbortFailedWithCode(c, http.StatusUnauthorized, err)
-			return
-		}
-		claims, err := httputils.ParseToken(token, pixiu.CoreV1.User().GetJWTKey())
+		claim, err := validate(c, o, keyBytes)
 		if err != nil {
 			httputils.AbortFailedWithCode(c, http.StatusUnauthorized, err)
 			return
 		}
 
-		c.Set(types.UserId, claims.Id)     // 保存用户id
-		c.Set(types.UserName, claims.Name) // 保存用户名
+		c.Set("userId", claim.Id)
+		c.Set("userName", claim.Name)
 	}
+}
+
+func validate(c *gin.Context, o *options.Options, keyBytes []byte) (*tokenutil.Claims, error) {
+	token, err := extractToken(c, false)
+	if err != nil {
+		return nil, err
+	}
+	claim, err := tokenutil.ParseToken(token, keyBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	if o.ComponentConfig.Default.Mode != "debug" {
+		existToken, err := o.Controller.User().GetLoginToken(c, claim.Id)
+		if err != nil {
+			return nil, fmt.Errorf("未登陆或者密码被修改，请重新登陆")
+		}
+		if token != existToken {
+			return nil, fmt.Errorf("已被他人登陆")
+		}
+	}
+
+	return claim, nil
 }
 
 // 从请求头中获取 token

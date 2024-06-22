@@ -20,38 +20,39 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
+
+	// 导入 docs.json 文件
+	_ "github.com/caoyingjunz/pixiu/api/docs"
+	_ "github.com/caoyingjunz/pixiu/api/server/validator"
 
 	"github.com/caoyingjunz/pixiu/api/server/middleware"
-	"github.com/caoyingjunz/pixiu/api/server/router/audit"
-	"github.com/caoyingjunz/pixiu/api/server/router/cicd"
-	"github.com/caoyingjunz/pixiu/api/server/router/cloud"
-	"github.com/caoyingjunz/pixiu/api/server/router/helm"
-	"github.com/caoyingjunz/pixiu/api/server/router/menu"
+	"github.com/caoyingjunz/pixiu/api/server/router/cluster"
+	"github.com/caoyingjunz/pixiu/api/server/router/plan"
 	"github.com/caoyingjunz/pixiu/api/server/router/proxy"
-	"github.com/caoyingjunz/pixiu/api/server/router/role"
+	"github.com/caoyingjunz/pixiu/api/server/router/tenant"
 	"github.com/caoyingjunz/pixiu/api/server/router/user"
 	"github.com/caoyingjunz/pixiu/cmd/app/options"
 )
 
-func InstallRouters(opt *options.Options) {
-	middleware.InstallMiddlewares(opt.GinEngine) // 安装中间件
+type RegisterFunc func(o *options.Options)
 
-	user.NewRouter(opt.GinEngine)  // 注册 user 路由
-	role.NewRouter(opt.GinEngine)  // 注册 role 路由
-	menu.NewRouter(opt.GinEngine)  // 注册 menu 路由
-	audit.NewRouter(opt.GinEngine) // 注册 audit 路由
-
-	// 注册 cicd 路由，根据配置文件中的开关判断是否注册
-	if opt.ComponentConfig.Cicd.Enable {
-		cicd.NewRouter(opt.GinEngine)
+func InstallRouters(o *options.Options) {
+	fs := []RegisterFunc{
+		middleware.InstallMiddlewares, cluster.NewRouter, proxy.NewRouter, tenant.NewRouter, user.NewRouter, plan.NewRouter,
 	}
 
-	cloud.NewRouter(opt.GinEngine) // 注册 cloud 路由
-	proxy.NewRouter(opt.GinEngine) // 注册 kubernetes proxy
-	helm.NewRouter(opt.GinEngine)  // 注册 helm 路由
+	install(o, fs...)
 
-	// 启动检查检查
-	opt.GinEngine.GET("/healthz", func(c *gin.Context) {
-		c.String(http.StatusOK, "ok")
-	})
+	// 启动健康检查
+	o.HttpEngine.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+	// 启动 APIs 服务
+	o.HttpEngine.GET("/api-ref/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+}
+
+func install(o *options.Options, fs ...RegisterFunc) {
+	for _, f := range fs {
+		f(o)
+	}
 }

@@ -16,39 +16,39 @@ limitations under the License.
 
 package user
 
-import "github.com/gin-gonic/gin"
+import (
+	"github.com/gin-gonic/gin"
 
-type userRouter struct{}
+	"github.com/caoyingjunz/pixiu/cmd/app/options"
+	"github.com/caoyingjunz/pixiu/pkg/controller"
+)
 
-func NewRouter(ginEngine *gin.Engine) {
-	u := &userRouter{}
-	u.initRoutes(ginEngine)
+type userRouter struct {
+	c controller.PixiuInterface
 }
 
-func (u *userRouter) initRoutes(ginEngine *gin.Engine) {
-	userRoute := ginEngine.Group("/users")
+func NewRouter(o *options.Options) {
+	router := &userRouter{
+		c: o.Controller,
+	}
+	router.initRoutes(o.HttpEngine)
+}
+
+func (u *userRouter) initRoutes(httpEngine *gin.Engine) {
+	// TODO: Base pixiu 后续作为常量定义
+	userRoute := httpEngine.Group("/pixiu/users")
 	{
 		userRoute.POST("", u.createUser)
-		userRoute.DELETE("/:id", u.deleteUser)
-		userRoute.PUT("/:id", u.updateUser)
-		userRoute.GET("/:id", u.getUser)
+		userRoute.PUT("/:userId", u.updateUser)
+		userRoute.DELETE("/:userId", u.deleteUser)
+		userRoute.GET("/:userId", u.getUser)
 		userRoute.GET("", u.listUsers)
+
+		// 用户修改密码或者管理员重置密码
+		userRoute.PUT("/:userId/password", u.updatePassword)
 
 		// 用户的登陆或者退出
 		userRoute.POST("/login", u.login)
-		userRoute.POST("/:id/logout", u.logout)
-
-		userRoute.PUT("/change/:id/password", u.changePassword) // 修改密码
-		userRoute.PUT("/reset/:id/password", u.resetPassword)   // 重置密码
-
-		userRoute.GET("/:id/roles", u.getUserRoles)  // 查询当前用户角色
-		userRoute.POST("/:id/roles", u.setUserRoles) // 根据用户id分配角色
-
-		// 根据菜单ID获取当前用户的权限
-		userRoute.GET("/permissions", u.getButtonsByCurrentUser)
-		// 根据用户ID获取用户的菜单
-		userRoute.GET("/menus", u.getLeftMenusByCurrentUser)
-		//修改用户状态
-		userRoute.PUT("/:id/status/:status", u.updateUserStatus)
+		userRoute.POST("/:userId/logout", u.logout)
 	}
 }

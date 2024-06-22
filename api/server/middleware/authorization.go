@@ -17,44 +17,55 @@ limitations under the License.
 package middleware
 
 import (
+	"fmt"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/caoyingjunz/pixiu/api/server/httputils"
-	"github.com/caoyingjunz/pixiu/pkg/errors"
-	"github.com/caoyingjunz/pixiu/pkg/pixiu"
+	"github.com/caoyingjunz/pixiu/cmd/app/options"
 )
 
-// Authorization 使用 rbac 授权策略
-// TODO: 后续优化
-func Authorization() gin.HandlerFunc {
+// Authorization 鉴权
+func Authorization(o *options.Options) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		path := c.Request.URL.Path
-		if AlwaysAllowPath.Has(path) {
+		// 允许请求直接通过
+		if alwaysAllowPath.Has(c.Request.URL.Path) || allowCustomRequest(c) {
 			return
 		}
 
-		// 用户 ID
-		uid, exist := c.Get("userId")
-		if !exist {
-			httputils.AbortFailedWithCode(c, http.StatusUnauthorized, errors.NoPermission)
-			return
-		}
-		enforcer := pixiu.CoreV1.Policy().GetEnforce()
-		if enforcer == nil {
-			httputils.AbortFailedWithCode(c, http.StatusInternalServerError, errors.InnerError)
-			return
-		}
-
-		ok, err := enforcer.Enforce(strconv.FormatInt(uid.(int64), 10), path, c.Request.Method)
+		status, err := GetStatus(c, o)
 		if err != nil {
-			httputils.AbortFailedWithCode(c, http.StatusInternalServerError, errors.InnerError)
+			httputils.AbortFailedWithCode(c, http.StatusMethodNotAllowed, err)
 			return
 		}
-		if !ok {
-			httputils.AbortFailedWithCode(c, http.StatusUnauthorized, errors.NoPermission)
+
+		// 禁用用户无法进行任何操作
+		if status == 2 {
+			httputils.AbortFailedWithCode(c, http.StatusMethodNotAllowed, fmt.Errorf("用户已被禁用"))
+			return
+		}
+		// status 为 1，表示用户只读模式, 只读模式只允许查询请求
+		if status == 1 {
+			if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodOptions {
+				httputils.AbortFailedWithCode(c, http.StatusMethodNotAllowed, fmt.Errorf("无操作权限"))
+				return
+			}
 		}
 	}
+}
+
+func GetStatus(c *gin.Context, o *options.Options) (int, error) {
+	// 从请求中获取用户ID
+	uid, ok := c.Get("userId")
+	if !ok {
+		return 0, fmt.Errorf("failed to get uid")
+	}
+
+	// 转换为 int64 的用户ID
+	userId, ok := uid.(int64)
+	if !ok {
+		return 0, fmt.Errorf("failed to assert uid")
+	}
+	return o.Controller.User().GetStatus(c, userId)
 }

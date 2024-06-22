@@ -18,40 +18,33 @@ package db
 
 import (
 	"gorm.io/gorm"
-
-	"github.com/caoyingjunz/pixiu/pkg/db/audit"
-	"github.com/caoyingjunz/pixiu/pkg/db/cloud"
-	"github.com/caoyingjunz/pixiu/pkg/db/user"
 )
 
 type ShareDaoFactory interface {
-	User() user.UserInterface
-	Cloud() cloud.CloudInterface
-	KubeConfig() cloud.KubeConfigInterface
-	Role() user.RoleInterface
-	Menu() user.MenuInterface
-	Audit() audit.Interface
-	Authentication() user.AuthenticationInterface
+	Cluster() ClusterInterface
+	Tenant() TenantInterface
+	User() UserInterface
+	Plan() PlanInterface
 }
 
 type shareDaoFactory struct {
 	db *gorm.DB
 }
 
-func (f *shareDaoFactory) Cloud() cloud.CloudInterface           { return cloud.NewCloud(f.db) }
-func (f *shareDaoFactory) KubeConfig() cloud.KubeConfigInterface { return cloud.NewKubeConfig(f.db) }
-func (f *shareDaoFactory) User() user.UserInterface              { return user.NewUser(f.db) }
-func (f *shareDaoFactory) Role() user.RoleInterface              { return user.NewRole(f.db) }
-func (f *shareDaoFactory) Menu() user.MenuInterface              { return user.NewMenu(f.db) }
-func (f *shareDaoFactory) Audit() audit.Interface                { return audit.NewAudit(f.db) }
+func (f *shareDaoFactory) Cluster() ClusterInterface { return newCluster(f.db) }
+func (f *shareDaoFactory) Tenant() TenantInterface   { return newTenant(f.db) }
+func (f *shareDaoFactory) User() UserInterface       { return newUser(f.db) }
+func (f *shareDaoFactory) Plan() PlanInterface       { return newPlan(f.db) }
 
-// Authentication TODO：优化
-func (f *shareDaoFactory) Authentication() user.AuthenticationInterface {
-	return user.NewAuthentication(f.db)
-}
+func NewDaoFactory(db *gorm.DB, migrate bool) (ShareDaoFactory, error) {
+	if migrate {
+		// 自动创建指定模型的数据库表结构
+		if err := newMigrator(db).AutoMigrate(); err != nil {
+			return nil, err
+		}
+	}
 
-func NewDaoFactory(db *gorm.DB) ShareDaoFactory {
 	return &shareDaoFactory{
 		db: db,
-	}
+	}, nil
 }

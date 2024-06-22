@@ -17,25 +17,66 @@ limitations under the License.
 package middleware
 
 import (
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-contrib/requestid"
 	"github.com/gin-gonic/gin"
+	klog "github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/caoyingjunz/pixiu/pkg/types"
-	"github.com/caoyingjunz/pixiu/pkg/util/env"
+	"github.com/caoyingjunz/pixiu/cmd/app/config"
+	"github.com/caoyingjunz/pixiu/cmd/app/options"
+	"github.com/caoyingjunz/pixiu/pkg/util"
 )
 
-var AlwaysAllowPath sets.String
+var alwaysAllowPath sets.String
 
-func InstallMiddlewares(ginEngine *gin.Engine) {
-	// 初始化可忽略的请求路径
-	AlwaysAllowPath = sets.NewString(types.HealthURL, types.LoginURL, types.LogoutURL)
+func init() {
+	alwaysAllowPath = sets.NewString("/pixiu/users/login")
+}
 
-	// 依次进行跨域，日志，单用户限速，总量限速，验证，鉴权和审计
-	ginEngine.Use(Cors(), LoggerToFile(), UserRateLimiter(), Limiter())
-	// TODO: 临时关闭
-	if !env.EnableDebug() {
-		ginEngine.Use(Authentication(), Authorization())
+// 允许特定请求不经过验证
+func allowCustomRequest(c *gin.Context) bool {
+	// 用户请求
+	if strings.HasPrefix(c.Request.URL.Path, "/pixiu/users") {
+		switch c.Request.Method {
+		case http.MethodPost:
+			return c.Query("initAdmin") == "true"
+		case http.MethodGet:
+			return c.Query("count") == "true"
+		}
 	}
 
-	ginEngine.Use(Admission(), Audit())
+	// TODO: 其他请求
+	return false
+}
+
+func InstallMiddlewares(o *options.Options) {
+	// set log format
+	if o.ComponentConfig.Default.LogFormat == config.LogFormatJson {
+		klog.SetFormatter(&klog.JSONFormatter{
+			TimestampFormat: time.RFC3339Nano,
+		})
+	} else {
+		klog.SetFormatter(&klog.TextFormatter{
+			FullTimestamp:   true,
+			TimestampFormat: time.RFC3339Nano,
+		})
+	}
+
+	// 依次进行跨域，日志，单用户限速，总量限速，验证，鉴权和审计
+	o.HttpEngine.Use(
+		requestid.New(requestid.WithGenerator(func() string {
+			return util.GenerateRequestID()
+		})),
+		Cors(),
+		Logger(),
+		UserRateLimiter(),
+		Limiter(),
+		Authentication(o),
+		Authorization(o),
+		Admission(),
+	)
 }

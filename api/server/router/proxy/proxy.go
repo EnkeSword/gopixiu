@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 
@@ -25,46 +26,50 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/caoyingjunz/pixiu/api/server/httputils"
-	"github.com/caoyingjunz/pixiu/pkg/pixiu"
+	"github.com/caoyingjunz/pixiu/cmd/app/options"
+	"github.com/caoyingjunz/pixiu/pkg/controller"
 )
 
 const (
-	proxyBaseURL = "/proxy/pixiu"
+	proxyBaseURL = "/pixiu/proxy"
 )
 
-type proxyRouter struct{}
-
-type Cloud struct {
-	Name string `uri:"cloud_name" binding:"required"`
+type proxyRouter struct {
+	c controller.PixiuInterface
 }
 
-func NewRouter(ginEngine *gin.Engine) {
-	s := &proxyRouter{}
-	s.initRoutes(ginEngine)
+func NewRouter(o *options.Options) {
+	s := &proxyRouter{
+		c: o.Controller,
+	}
+	s.initRoutes(o.HttpEngine)
 }
 
 func (p *proxyRouter) initRoutes(ginEngine *gin.Engine) {
-	auditRoute := ginEngine.Group("/proxy")
+	proxyRoute := ginEngine.Group("/pixiu/")
 	{
-		auditRoute.Any("/pixiu/:cloud_name/*act", p.proxyHandler)
+		proxyRoute.Any("/proxy/:clusterName/*act", p.proxyHandler)
 	}
 }
 
 func (p *proxyRouter) proxyHandler(c *gin.Context) {
 	resp := httputils.NewResponse()
 
-	var cloud Cloud
-	if err := c.ShouldBindUri(&cloud); err != nil {
+	var cluster struct {
+		Name string `uri:"clusterName" binding:"required"`
+	}
+	if err := c.ShouldBindUri(&cluster); err != nil {
 		httputils.SetFailed(c, resp, err)
 		return
 	}
-	name := cloud.Name
 
-	config, exists := pixiu.CoreV1.Cloud().GetClusterConfig(c, name)
-	if !exists {
-		httputils.SetFailed(c, resp, fmt.Errorf("cluster %q not register", name))
+	name := cluster.Name
+	config, err := p.c.Cluster().GetKubeConfigByName(context.TODO(), name)
+	if err != nil {
+		httputils.SetFailed(c, resp, fmt.Errorf("failed to get cluster %q kubeconfig", name))
 		return
 	}
+
 	transport, err := rest.TransportFor(config)
 	if err != nil {
 		httputils.SetFailed(c, resp, err)
@@ -81,14 +86,14 @@ func (p *proxyRouter) proxyHandler(c *gin.Context) {
 	httpProxy.ServeHTTP(c.Writer, c.Request)
 }
 
-func (p *proxyRouter) parseTarget(target url.URL, host string, cloud string) (*url.URL, error) {
+func (p *proxyRouter) parseTarget(target url.URL, host string, name string) (*url.URL, error) {
 	kubeURL, err := url.Parse(host)
 	if err != nil {
 		return nil, err
 	}
 
 	// TODO: 检查 URL 是否规范
-	target.Path = target.Path[len(proxyBaseURL+"/"+cloud):]
+	target.Path = target.Path[len(proxyBaseURL+"/"+name):]
 
 	target.Host = kubeURL.Host
 	target.Scheme = kubeURL.Scheme

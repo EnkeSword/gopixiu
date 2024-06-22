@@ -2,20 +2,47 @@ name: Publish pixiu image
 
 on:
   push:
-    branches: [ "master" ]
+    branches:
+      - "master"
+    paths-ignore:
+      - 'docs/**'
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      - name: Login in dockerhub
-        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+      - name: Get short commit hash
+        run: |
+          echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "TIMESTAMP=$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login harbor
+        uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_NAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: harbor.cloud.pixiuio.com
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
 
       - name: Build and push the pixiu image
-        run: make image && make push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ env.COMMIT_HASH }}-${{ env.TIMESTAMP }}
+          push: true
+          tags: |
+            harbor.cloud.pixiuio.com/${{ secrets.HARBOR_PROJECT }}/pixiu:latest
+            harbor.cloud.pixiuio.com/${{ secrets.HARBOR_PROJECT }}/pixiu:v0.1
+            harbor.cloud.pixiuio.com/${{ secrets.HARBOR_PROJECT }}/pixiu:${{ env.COMMIT_HASH }}

@@ -17,44 +17,45 @@ limitations under the License.
 package options
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"strings"
+	"time"
 
-	"github.com/bndr/gojenkins"
-	pixiuConfig "github.com/caoyingjunz/pixiulib/config"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cobra"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/caoyingjunz/pixiu/cmd/app/config"
+	"github.com/caoyingjunz/pixiu/pkg/controller"
 	"github.com/caoyingjunz/pixiu/pkg/db"
-	"github.com/caoyingjunz/pixiu/pkg/db/user"
-	"github.com/caoyingjunz/pixiu/pkg/log"
-	"github.com/caoyingjunz/pixiu/pkg/types"
-	"github.com/caoyingjunz/pixiu/pkg/util"
+	pixiuConfig "github.com/caoyingjunz/pixiulib/config"
 )
 
 const (
 	maxIdleConns = 10
 	maxOpenConns = 100
 
+	defaultListen     = 8080
+	defaultTokenKey   = "pixiu"
 	defaultConfigFile = "/etc/pixiu/config.yaml"
+	defaultLogFormat  = config.LogFormatJson
+	defaultWorkDir    = "/etc/pixiu"
+
+	defaultSlowSQLDuration = 1 * time.Second
 )
 
 // Options has all the params needed to run a pixiu
 type Options struct {
 	// The default values.
 	ComponentConfig config.Config
-	GinEngine       *gin.Engine
+	HttpEngine      *gin.Engine
 
-	DB      *gorm.DB
-	Factory db.ShareDaoFactory // 数据库接口
-
-	// CICD 的驱动接口
-	CicdDriver *gojenkins.Jenkins
+	// 数据库接口
+	Factory db.ShareDaoFactory
+	// 貔貅主控制接口
+	Controller controller.PixiuInterface
 
 	// ConfigFile is the location of the pixiu server's configuration file.
 	ConfigFile string
@@ -62,6 +63,7 @@ type Options struct {
 
 func NewOptions() (*Options, error) {
 	return &Options{
+		HttpEngine: gin.Default(), // 初始化默认 api 路由
 		ConfigFile: defaultConfigFile,
 	}, nil
 }
@@ -85,46 +87,45 @@ func (o *Options) Complete() error {
 		return err
 	}
 
-	// 初始化默认 api 路由
-	o.GinEngine = gin.Default()
+	// TODO: move to config initialization?
+	if o.ComponentConfig.Default.Listen == 0 {
+		o.ComponentConfig.Default.Listen = defaultListen
+	}
+	if len(o.ComponentConfig.Default.JWTKey) == 0 {
+		o.ComponentConfig.Default.JWTKey = defaultTokenKey
+	}
+	if o.ComponentConfig.Default.LogFormat == "" {
+		o.ComponentConfig.Default.LogFormat = defaultLogFormat
+	}
+	if o.ComponentConfig.Worker.WorkDir == "" {
+		o.ComponentConfig.Worker.WorkDir = defaultWorkDir
+	}
+
+	if err := o.ComponentConfig.Valid(); err != nil {
+		return err
+	}
 
 	// 注册依赖组件
 	if err := o.register(); err != nil {
 		return err
 	}
+
+	o.Controller = controller.New(o.ComponentConfig, o.Factory)
 	return nil
 }
 
 // BindFlags binds the pixiu Configuration struct fields
 func (o *Options) BindFlags(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&o.ConfigFile, "configfile", "", "The location of the pixiu configuration file")
+	cmd.Flags().StringVar(&o.ConfigFile, "configfile", defaultConfigFile, "The location of the pixiu configuration file")
 }
 
 func (o *Options) register() error {
-	if err := o.registerLogger(); err != nil { // 注册日志
-		return err
-	}
-	if err := o.registerDatabase(); err != nil { // 注册数据库
-		return err
-	}
-	if err := o.registerCicdDriver(); err != nil { // 注册 CICD driver
+	// 注册数据库
+	if err := o.registerDatabase(); err != nil {
 		return err
 	}
 
-	return nil
-}
-
-func (o *Options) registerLogger() error {
-	logType := strings.ToLower(o.ComponentConfig.Default.LogType)
-	if logType == "file" {
-		// 判断文件夹是否存在，不存在则创建
-		if err := util.EnsureDirectoryExists(o.ComponentConfig.Default.LogDir); err != nil {
-			return err
-		}
-	}
-	// 注册日志
-	log.Register(logType, o.ComponentConfig.Default.LogDir, o.ComponentConfig.Default.LogLevel)
-
+	// TODO: 注册其他依赖
 	return nil
 }
 
@@ -137,46 +138,30 @@ func (o *Options) registerDatabase() error {
 		sqlConfig.Port,
 		sqlConfig.Name)
 
-	var err error
-	if o.DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{}); err != nil {
+	opt := &gorm.Config{
+		Logger: db.NewLogger(logger.Info, defaultSlowSQLDuration),
+	}
+	DB, err := gorm.Open(mysql.Open(dsn), opt)
+	if err != nil {
 		return err
 	}
 	// 设置数据库连接池
-	sqlDB, err := o.DB.DB()
+	sqlDB, err := DB.DB()
 	if err != nil {
 		return err
 	}
 	sqlDB.SetMaxIdleConns(maxIdleConns)
 	sqlDB.SetMaxOpenConns(maxOpenConns)
 
-	o.Factory = db.NewDaoFactory(o.DB)
-
-	// TODO：优化
-	// 注册 policy
-	if err = user.InitPolicyEnforcer(o.DB); err != nil {
+	o.Factory, err = db.NewDaoFactory(DB, o.ComponentConfig.Default.AutoMigrate)
+	if err != nil {
 		return err
 	}
-
-	return nil
-}
-
-func (o *Options) registerCicdDriver() error {
-	jenkinsOption := o.ComponentConfig.Cicd.Jenkins
-	if o.ComponentConfig.Cicd.Enable {
-		switch o.ComponentConfig.Cicd.Driver {
-		case "", types.Jenkins:
-			o.CicdDriver = gojenkins.CreateJenkins(nil, jenkinsOption.Host, jenkinsOption.User, jenkinsOption.Password)
-			if _, err := o.CicdDriver.Init(context.TODO()); err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
 }
 
 // Validate validates all the required options.
-// TODO
 func (o *Options) Validate() error {
+	// TODO
 	return nil
 }

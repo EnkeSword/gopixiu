@@ -19,31 +19,40 @@ package user
 import (
 	"github.com/gin-gonic/gin"
 
-	pixiumeta "github.com/caoyingjunz/pixiu/api/meta"
 	"github.com/caoyingjunz/pixiu/api/server/httputils"
-	"github.com/caoyingjunz/pixiu/api/types"
-	"github.com/caoyingjunz/pixiu/pkg/errors"
-	"github.com/caoyingjunz/pixiu/pkg/pixiu"
-	"github.com/caoyingjunz/pixiu/pkg/util"
+	"github.com/caoyingjunz/pixiu/pkg/types"
 )
 
-// @Summary      Create a user
-// @Description  Create a user
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        data body types.User true "user info"
-// @Success      200  {object}  httputils.HttpOK
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users [post]
+type IdMeta struct {
+	UserId int64 `uri:"userId" binding:"required"`
+}
+
+// CreateUser godoc
+//
+//	@Summary      Create a user
+//	@Description  Create by a json user
+//	@Tags         Users
+//	@Accept       json
+//	@Produce      json
+//	@Param        user  body      types.CreateUserRequest  true  "Create user"
+//	@Success      200   {object}  httputils.Response
+//	@Failure      400   {object}  httputils.Response
+//	@Failure      404   {object}  httputils.Response
+//	@Failure      500   {object}  httputils.Response
+//	@Router       /pixiu/users/ [post]
+//	              @Security  Bearer
 func (u *userRouter) createUser(c *gin.Context) {
 	r := httputils.NewResponse()
-	var user types.User
-	if err := c.ShouldBindJSON(&user); err != nil {
+
+	var (
+		req types.CreateUserRequest
+		err error
+	)
+	if err = c.ShouldBindJSON(&req); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
-	if err := pixiu.CoreV1.User().Create(c, &user); err != nil {
+	if err = u.c.User().Create(c, &req); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
@@ -51,36 +60,34 @@ func (u *userRouter) createUser(c *gin.Context) {
 	httputils.SetSuccess(c, r)
 }
 
-// 更新用户属性：
-// 不允许更改字段:
-// 1. 用户名
-// 2. 用户密码 —— 通过修改密码API进行修改
-// @Summary      Update  user
-// @Description  Update a user
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        id   path      int  true  "user ID"  Format(int64)
-// @Param        data body types.User true "user info"
-// @Success      200  {object}  httputils.HttpOK
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users [put]
+// UpdateUser godoc
+//
+//	@Summary      Update an user
+//	@Description  Update by json user
+//	@Tags         Users
+//	@Accept       json
+//	@Produce      json
+//	@Param        userId  path      int                      true  "User ID"
+//	@Param        user    body      types.UpdateUserRequest  true  "Update user"
+//	@Success      200     {object}  httputils.Response
+//	@Failure      400     {object}  httputils.Response
+//	@Failure      404     {object}  httputils.Response
+//	@Failure      500     {object}  httputils.Response
+//	@Router       /pixiu/users/{userId} [put]
+//	              @Security  Bearer
 func (u *userRouter) updateUser(c *gin.Context) {
 	r := httputils.NewResponse()
+
 	var (
-		err  error
-		user types.User
+		idMeta IdMeta
+		req    types.UpdateUserRequest
+		err    error
 	)
-	if err = c.ShouldBindJSON(&user); err != nil {
+	if err = httputils.ShouldBindAny(c, &req, &idMeta, nil); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
-	user.Id, err = util.ParseInt64(c.Param("id"))
-	if err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
-	if err = pixiu.CoreV1.User().Update(c, &user); err != nil {
+	if err = u.c.User().Update(c, idMeta.UserId, &req); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
@@ -88,23 +95,67 @@ func (u *userRouter) updateUser(c *gin.Context) {
 	httputils.SetSuccess(c, r)
 }
 
-// @Summary      Delete user by user id
-// @Description  Delete user by user id
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        id   path      int  true  "user ID"  Format(int64)
-// @Success      200  {object}  httputils.HttpOK
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/{id} [delete]
+// UpdateUserPassword godoc
+//
+//	@Summary      Update user password
+//	@Description  Update by json user
+//	@Tags         Users
+//	@Accept       json
+//	@Produce      json
+//	@Param        userId  path      int                              true  "User ID"
+//	@Param        user    body      types.UpdateUserPasswordRequest  true  "Update user password"
+//	@Success      200     {object}  httputils.Response
+//	@Failure      400     {object}  httputils.Response
+//	@Failure      404     {object}  httputils.Response
+//	@Failure      500     {object}  httputils.Response
+//	@Router       /pixiu/users/password [put]
+//	              @Security  Bearer
+func (u *userRouter) updatePassword(c *gin.Context) {
+	r := httputils.NewResponse()
+
+	var (
+		idMeta IdMeta
+		req    types.UpdateUserPasswordRequest
+		err    error
+	)
+	if err = httputils.ShouldBindAny(c, &req, &idMeta, nil); err != nil {
+		httputils.SetFailed(c, r, err)
+		return
+	}
+	if err = u.c.User().UpdatePassword(c, idMeta.UserId, &req); err != nil {
+		httputils.SetFailed(c, r, err)
+		return
+	}
+
+	httputils.SetSuccess(c, r)
+}
+
+// DeleteUser godoc
+//
+//	@Summary      Delete user by userId
+//	@Description  Delete by userID
+//	@Tags         Users
+//	@Accept       json
+//	@Produce      json
+//	@Param        userId  path      int  true  "User ID"
+//	@Success      200     {object}  httputils.Response
+//	@Failure      400     {object}  httputils.Response
+//	@Failure      404     {object}  httputils.Response
+//	@Failure      500     {object}  httputils.Response
+//	@Router       /pixiu/users/{userId} [delete]
+//	              @Security  Bearer
 func (u *userRouter) deleteUser(c *gin.Context) {
 	r := httputils.NewResponse()
-	uid, err := util.ParseInt64(c.Param("id"))
-	if err != nil {
+
+	var (
+		idMeta IdMeta
+		err    error
+	)
+	if err = c.ShouldBindUri(&idMeta); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
-	if err = pixiu.CoreV1.User().Delete(c, uid); err != nil {
+	if err = u.c.User().Delete(c, idMeta.UserId); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
@@ -112,24 +163,32 @@ func (u *userRouter) deleteUser(c *gin.Context) {
 	httputils.SetSuccess(c, r)
 }
 
-// @Summary      Get user info by user id
-// @Description  Get user info by user id
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        id   path      int  true  "user ID"  Format(int64)
-// @Success      200  {object}  httputils.Response{result=types.User}
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/{id} [get]
+// Getuser godoc
+//
+//	@Summary      Get user by userId
+//	@Description  Get by user ID
+//	@Tags         Users
+//	@Accept       json
+//	@Produce      json
+//	@Param        userId  path      int  true  "User ID"
+//	@Success      200     {object}  httputils.Response{result=types.User}
+//	@Failure      400     {object}  httputils.Response
+//	@Failure      404     {object}  httputils.Response
+//	@Failure      500     {object}  httputils.Response
+//	@Router       /pixiu/users/{userId} [get]
+//	              @Security  Bearer
 func (u *userRouter) getUser(c *gin.Context) {
 	r := httputils.NewResponse()
-	uid, err := util.ParseInt64(c.Param("id"))
-	if err != nil {
+
+	var (
+		idMeta IdMeta
+		err    error
+	)
+	if err = c.ShouldBindUri(&idMeta); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
-	r.Result, err = pixiu.CoreV1.User().Get(c, uid)
-	if err != nil {
+	if r.Result, err = u.c.User().Get(c, idMeta.UserId); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
@@ -137,20 +196,35 @@ func (u *userRouter) getUser(c *gin.Context) {
 	httputils.SetSuccess(c, r)
 }
 
-// @Summary      List user info
-// @Description  List user info
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        page   query      int  false  "pageSize"
-// @Param        limit   query      int  false  "page limit"
-// @Success      200  {object}  httputils.Response{result=model.PageUser}
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users [get]
+// Listusers godoc
+//
+//	@Summary      List users
+//	@Description  List users
+//	@Tags         Users
+//	@Accept       json
+//	@Produce      json
+//	@Success      200  {array}   httputils.Response{result=[]types.User}
+//	@Failure      400  {object}  httputils.Response
+//	@Failure      404  {object}  httputils.Response
+//	@Failure      500  {object}  httputils.Response
+//	@Router       /pixiu/users [get]
+//	              @Security  Bearer
 func (u *userRouter) listUsers(c *gin.Context) {
 	r := httputils.NewResponse()
-	var err error
-	if r.Result, err = pixiu.CoreV1.User().List(c, pixiumeta.ParseListSelector(c)); err != nil {
+	var (
+		opts types.ListOptions
+		err  error
+	)
+	if err = httputils.ShouldBindAny(c, nil, nil, &opts); err != nil {
+		httputils.SetFailed(c, r, err)
+		return
+	}
+	if opts.Count {
+		r.Result, err = u.c.User().GetCount(c, opts)
+	} else {
+		r.Result, err = u.c.User().List(c, opts)
+	}
+	if err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
@@ -158,29 +232,31 @@ func (u *userRouter) listUsers(c *gin.Context) {
 	httputils.SetSuccess(c, r)
 }
 
-// login
-// 1. 检验用户名和密码是否正确，
-// 2. 返回 token
-// @Summary      Login
-// @Description  Login
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        data body types.User true "user info"
-// @Success      200  {object}  httputils.HttpOK
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/login [post]
+// Login godoc
+//
+//	@Summary      User login
+//	@Description  Login by a json user
+//	@Tags         Login
+//	@Accept       json
+//	@Produce      json
+//	@Param        user  body      types.LoginRequest  true  "User login"
+//	@Success      200   {object}  httputils.Response
+//	@Failure      400   {object}  httputils.Response
+//	@Failure      404   {object}  httputils.Response
+//	@Failure      500   {object}  httputils.Response
+//	@Router       /pixiu/users/login [post]
 func (u *userRouter) login(c *gin.Context) {
 	r := httputils.NewResponse()
+
 	var (
-		user types.User
-		err  error
+		req types.LoginRequest
+		err error
 	)
-	if err = c.ShouldBindJSON(&user); err != nil {
+	if err = c.ShouldBindJSON(&req); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
-	if r.Result, err = pixiu.CoreV1.User().Login(c, &user); err != nil {
+	if r.Result, err = u.c.User().Login(c, &req); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
@@ -188,226 +264,9 @@ func (u *userRouter) login(c *gin.Context) {
 	httputils.SetSuccess(c, r)
 }
 
-// 用户退出
-// @Summary      用户退出
-// @Description  用户退出
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        buildCloud body types.BuildCloud true "build a cloud"
-// @Success      200  {object}  httputils.HttpOK
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/:id/logout [post]
 // TODO
-func (u *userRouter) logout(c *gin.Context) {}
-
-// @Summary      reset password by user id
-// @Description  reset password by user id
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        id   path      int  true  "user ID"  Format(int64)
-// @Success      200  {object}  httputils.Response{result=types.User}
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/{id}/password [put]
-func (u *userRouter) resetPassword(c *gin.Context) {
+func (u *userRouter) logout(c *gin.Context) {
 	r := httputils.NewResponse()
-	var (
-		err  error
-		opts pixiumeta.IdMeta
-	)
-	if err = c.ShouldBindUri(&opts); err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
-	if err = pixiu.CoreV1.User().ResetPassword(c, opts.Id, c.GetInt64("userId")); err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
-
-	httputils.SetSuccess(c, r)
-}
-
-// @Summary      Change user password
-// @Description  Change user password
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        id   path      int  true  "user ID"  Format(int64)
-// @Param        data body types.Password true "password info"
-// @Success      200  {object}  httputils.HttpOK
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/change/{id}/password [put]
-func (u *userRouter) changePassword(c *gin.Context) {
-	r := httputils.NewResponse()
-	var opts pixiumeta.IdMeta
-	if err := c.ShouldBindUri(&opts); err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
-	// 解析修改密码的三个参数
-	//  1. 当前密码 2. 新密码 3. 确认新密码
-	var password types.Password
-	if err := c.ShouldBindJSON(&password); err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
-	password.UserId = opts.Id
-
-	// 需要通过 token 中的 id 判断当前操作的用户和需要修改密码的用户是否是同一个
-	// Get the uid from token
-	if err := pixiu.CoreV1.User().ChangePassword(c, c.GetInt64("userId"), &password); err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
-
-	httputils.SetSuccess(c, r)
-}
-
-// @Summary      Get user permission
-// @Description  Get user permission
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Success      200  {object}  httputils.Response{result=[]string}
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/permissions [get]
-func (u *userRouter) getButtonsByCurrentUser(c *gin.Context) {
-	r := httputils.NewResponse()
-	uidStr, exist := c.Get("userId")
-	if !exist {
-		httputils.SetFailed(c, r, errors.NoUserIdError)
-		return
-	}
-	uid := uidStr.(int64)
-
-	res, err := pixiu.CoreV1.User().GetButtonsByUserID(c, uid)
-	if err != nil {
-		httputils.SetFailed(c, r, errors.OperateFailed)
-		return
-	}
-	r.Result = res
-	httputils.SetSuccess(c, r)
-}
-
-// @Summary      Get left menus by current user
-// @Description  Get left menus  by current user
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Success      200  {object}  httputils.Response{result=[]model.Menu}
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/menus [get]
-func (u *userRouter) getLeftMenusByCurrentUser(c *gin.Context) {
-	uidStr, exist := c.Get("userId")
-	r := httputils.NewResponse()
-	if !exist {
-		httputils.SetFailed(c, r, errors.NoUserIdError)
-		return
-	}
-	var err error
-	uid := uidStr.(int64)
-	r.Result, err = pixiu.CoreV1.User().GetLeftMenusByUserID(c, uid)
-	if err != nil {
-		httputils.SetFailed(c, r, errors.OperateFailed)
-		return
-	}
-
-	httputils.SetSuccess(c, r)
-}
-
-// @Summary      Get user roles by user id
-// @Description  Get users roles by user id
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        id   path      int  true  "user ID"  Format(int64)
-// @Success      200  {object}  httputils.Response{result=model.Role}
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/{id}/roles [get]
-func (u *userRouter) getUserRoles(c *gin.Context) {
-	r := httputils.NewResponse()
-	uid, err := util.ParseInt64(c.Param("id"))
-	if err != nil {
-		httputils.SetFailed(c, r, errors.ParamsError)
-		return
-	}
-	result, err := pixiu.CoreV1.User().GetRoleIDByUser(c, uid)
-	if err != nil {
-		httputils.SetFailed(c, r, errors.OperateFailed)
-		return
-	}
-	r.Result = result
-	httputils.SetSuccess(c, r)
-}
-
-// @Summary      Assign User Roles base on user id
-// @Description  Assign User Roles base on user id
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        id   path      int  true  "user ID"  Format(int64)
-// @Param        data body types.Roles true "role ids"
-// @Success      200  {object}  httputils.HttpOK
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/{id}/roles [post]
-func (u *userRouter) setUserRoles(c *gin.Context) {
-	var roles types.Roles
-	r := httputils.NewResponse()
-	err := c.ShouldBindJSON(&roles)
-	if err != nil {
-		httputils.SetFailed(c, r, errors.ParamsError)
-		return
-	}
-
-	uid, err := util.ParseInt64(c.Param("id"))
-	if err != nil {
-		httputils.SetFailed(c, r, errors.ParamsError)
-		return
-	}
-
-	res, err := pixiu.CoreV1.User().Get(c, uid)
-	if err != nil || res == nil {
-		httputils.SetFailed(c, r, errors.ParamsError)
-		return
-	}
-
-	err = pixiu.CoreV1.User().SetUserRoles(c, uid, roles.RoleIds)
-	if err != nil {
-		httputils.SetFailed(c, r, errors.OperateFailed)
-		return
-	}
-	httputils.SetSuccess(c, r)
-}
-
-// @Summary      Update  user status
-// @Description  Update  user status
-// @Tags         users
-// @Accept       json
-// @Produce      json
-// @Param        id   path      int  true  "user ID"  Format(int64)
-// @Param        status   path      int  true  "status"  Format(int64)
-// @Success      200  {object}  httputils.HttpOK
-// @Failure      400  {object}  httputils.HttpError
-// @Router       /users/:id/status/:status [put]
-func (u *userRouter) updateUserStatus(c *gin.Context) {
-	r := httputils.NewResponse()
-
-	userId, err := util.ParseInt64(c.Param("id"))
-	if err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
-	status, err := util.ParseInt64(c.Param("status"))
-	if err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
-
-	if err = pixiu.CoreV1.User().UpdateStatus(c, userId, status); err != nil {
-		httputils.SetFailed(c, r, err)
-		return
-	}
 
 	httputils.SetSuccess(c, r)
 }
