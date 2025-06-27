@@ -285,3 +285,26 @@ func (cr *clusterRouter) getEventList(c *gin.Context) {
 
 	httputils.SetSuccess(c, r)
 }
+
+func (cr *clusterRouter) watchPodLog(c *gin.Context) {
+	r := httputils.NewResponse()
+
+	var (
+		opts struct {
+			Cluster   string `uri:"cluster" binding:"required"`
+			Namespace string `uri:"namespace" binding:"required"`
+			Pod       string `uri:"pod" binding:"required"` //pod name
+		}
+		logOpt types.PodLogOptions
+		err    error
+	)
+	if err = httputils.ShouldBindAny(c, nil, &opts, &logOpt); err != nil {
+		httputils.SetFailed(c, r, err)
+		return
+	}
+	// websocket
+	if err = cr.c.Cluster().WatchPodLog(c, opts.Cluster, opts.Namespace, opts.Pod, logOpt.Container, logOpt.TailLines, c.Writer, c.Request); err != nil {
+		httputils.SetFailed(c, r, err)
+		return
+	}
+}

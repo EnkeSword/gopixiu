@@ -18,6 +18,7 @@ package plan
 
 import (
 	"context"
+	"strings"
 
 	"k8s.io/klog/v2"
 
@@ -115,10 +116,11 @@ func (p *plan) buildNodeFromRequest(planId int64, req *types.CreatePlanNodeReque
 	if err != nil {
 		return nil, err
 	}
+
 	return &model.Node{
 		Name:   req.Name,
 		PlanId: planId,
-		Role:   req.Role,
+		Role:   strings.Join(req.Role, ","),
 		CRI:    req.CRI,
 		Ip:     req.Ip,
 		Auth:   auth,
@@ -200,7 +202,7 @@ func (p *plan) CreateOrUpdateNode(ctx context.Context, object *model.Node) error
 		return nil
 	}
 	klog.Infof("plan(%d) node(%s) already exist and need to update %v", object.PlanId, object.Name, updates)
-	return p.factory.Plan().UpdateNode(ctx, object.PlanId, object.ResourceVersion, updates)
+	return p.factory.Plan().UpdateNode(ctx, old.Id, old.ResourceVersion, updates)
 }
 
 func (p *plan) modelNode2Type(o *model.Node) (*types.PlanNode, error) {
@@ -220,7 +222,7 @@ func (p *plan) modelNode2Type(o *model.Node) (*types.PlanNode, error) {
 		},
 		PlanId: o.PlanId,
 		Name:   o.Name,
-		Role:   o.Role,
+		Role:   strings.Split(o.Role, ","),
 		Ip:     o.Ip,
 		Auth:   auth,
 	}, nil

@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The Pixiu Authors.
+Copyright 2024 The Pixiu Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,31 +14,50 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cluster
+package audit
 
 import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/caoyingjunz/pixiu/api/server/httputils"
+	"github.com/caoyingjunz/pixiu/pkg/types"
 )
 
-type HelmMeta struct {
-	Cluster   string `uri:"cluster" binding:"required"`
-	Namespace string `uri:"namespace" binding:"required"`
-	Name      string `uri:"name"`
+type AuditMeta struct {
+	AuditId int64 `uri:"auditId" binding:"required"`
 }
 
-func (cr *clusterRouter) ListReleases(c *gin.Context) {
+func (a *auditRouter) getAudit(c *gin.Context) {
 	r := httputils.NewResponse()
+
 	var (
-		err      error
-		helmMeta HelmMeta
+		opt AuditMeta
+		err error
 	)
-	if err = c.ShouldBindUri(&helmMeta); err != nil {
+	if err = c.ShouldBindUri(&opt); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}
-	if r.Result, err = cr.c.Cluster().ListReleases(c, helmMeta.Cluster, helmMeta.Namespace); err != nil {
+	if r.Result, err = a.c.Audit().Get(c, opt.AuditId); err != nil {
+		httputils.SetFailed(c, r, err)
+		return
+	}
+
+	httputils.SetSuccess(c, r)
+}
+
+func (a *auditRouter) listAudits(c *gin.Context) {
+	r := httputils.NewResponse()
+
+	var (
+		listOption types.ListOptions // 分页设置
+		err        error
+	)
+	if err = httputils.ShouldBindAny(c, nil, nil, &listOption); err != nil {
+		httputils.SetFailed(c, r, err)
+		return
+	}
+	if r.Result, err = a.c.Audit().List(c, listOption); err != nil {
 		httputils.SetFailed(c, r, err)
 		return
 	}

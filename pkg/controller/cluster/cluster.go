@@ -19,28 +19,33 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"helm.sh/helm/v3/pkg/release"
+	"github.com/casbin/casbin/v2"
+	"github.com/gorilla/websocket"
+	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	restclient "k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/klog/v2"
 	"k8s.io/metrics/pkg/apis/metrics/v1beta1"
 
 	"github.com/caoyingjunz/pixiu/api/server/errors"
+	"github.com/caoyingjunz/pixiu/api/server/httputils"
 	"github.com/caoyingjunz/pixiu/cmd/app/config"
 	"github.com/caoyingjunz/pixiu/pkg/client"
+	ctrlutil "github.com/caoyingjunz/pixiu/pkg/controller/util"
 	"github.com/caoyingjunz/pixiu/pkg/db"
 	"github.com/caoyingjunz/pixiu/pkg/db/model"
 	"github.com/caoyingjunz/pixiu/pkg/types"
@@ -72,22 +77,48 @@ type Interface interface {
 	AggregateEvents(ctx context.Context, cluster string, namespace string, name string, kind string) (*v1.EventList, error)
 	// WsHandler pod 的 webShell
 	WsHandler(ctx context.Context, webShellOptions *types.WebShellOptions, w http.ResponseWriter, r *http.Request) error
+	// WsNodeHandler node 的 webShell
+	WsNodeHandler(ctx context.Context, sshConfig *types.WebSSHRequest, w http.ResponseWriter, r *http.Request) error
 
-	// ListReleases 获取 tenant release 列表
-	ListReleases(ctx context.Context, cluster string, namespace string) ([]*release.Release, error)
+	// WatchPodLog 实时获取 pod 的日志
+	WatchPodLog(ctx context.Context, cluster string, namespace string, podName string, containerName string, tailLine int64, w http.ResponseWriter, r *http.Request) error
+	// ReRunJob 重新执行指定任务
+	ReRunJob(ctx context.Context, cluster string, namespace string, jobName string, resourceVersion string) error
 
 	GetKubeConfigByName(ctx context.Context, name string) (*restclient.Config, error)
+
+	GetIndexerResource(ctx context.Context, cluster string, resource string, namespace string, name string) (interface{}, error)
+	ListIndexerResources(ctx context.Context, cluster string, resource string, namespace string, listOption types.ListOptions) (interface{}, error)
+
+	// Run 启动 cluster worker 处理协程
+	Run(ctx context.Context, workers int) error
 }
 
-var clusterIndexer client.Cache
+var ClusterIndexer client.Cache
 
 func init() {
-	clusterIndexer = *client.NewClusterCache()
+	ClusterIndexer = *client.NewClusterCache()
+}
+
+type (
+	listerFunc func(ctx context.Context, informer *client.PixiuInformer, namespace string, listOption types.ListOptions) (interface{}, error)
+	getterFunc func(ctx context.Context, informer *client.PixiuInformer, namespace, name string) (interface{}, error)
+)
+
+type InformerResource struct {
+	// k8s 资源类型，比如 deployment, sts, daemonset 等
+	ResourceType string
+	ListerFunc   listerFunc
+	GetterFunc   getterFunc
 }
 
 type cluster struct {
-	cc      config.Config
-	factory db.ShareDaoFactory
+	cc       config.Config
+	factory  db.ShareDaoFactory
+	enforcer *casbin.SyncedEnforcer
+
+	listerFuncs map[string]listerFunc
+	getterFuncs map[string]getterFunc
 }
 
 func (c *cluster) preCreate(ctx context.Context, req *types.CreateClusterRequest) error {
@@ -99,6 +130,11 @@ func (c *cluster) preCreate(ctx context.Context, req *types.CreateClusterRequest
 }
 
 func (c *cluster) Create(ctx context.Context, req *types.CreateClusterRequest) error {
+	user, err := httputils.GetUserFromRequest(ctx)
+	if err != nil {
+		return errors.NewError(err, http.StatusInternalServerError)
+	}
+
 	if err := c.preCreate(ctx, req); err != nil {
 		return errors.NewError(err, http.StatusBadRequest)
 	}
@@ -108,11 +144,19 @@ func (c *cluster) Create(ctx context.Context, req *types.CreateClusterRequest) e
 	}
 
 	var cs *client.ClusterSet
-	var txFunc db.TxFunc = func() (err error) {
-		cs, err = client.NewClusterSet(req.KubeConfig)
-		return err
+	var txFunc = func(cluster *model.Cluster) (err error) {
+		if cs, err = client.NewClusterSet(req.KubeConfig); err != nil {
+			return
+		}
+
+		// insert a user RBAC policy
+		policy := model.NewPolicyFromModels(user, model.ObjectCluster, cluster.Model, model.OpAll)
+		_, err = c.enforcer.AddPolicy(policy.Raw())
+		return
 	}
 
+	kubeNode := types.KubeNode{}
+	nodes, _ := kubeNode.Marshal()
 	if _, err := c.factory.Cluster().Create(ctx, &model.Cluster{
 		Name:        req.Name,
 		AliasName:   req.AliasName,
@@ -120,13 +164,14 @@ func (c *cluster) Create(ctx context.Context, req *types.CreateClusterRequest) e
 		Protected:   req.Protected,
 		KubeConfig:  req.KubeConfig,
 		Description: req.Description,
+		Nodes:       nodes,
 	}, txFunc); err != nil {
 		klog.Errorf("failed to create cluster %s: %v", req.Name, err)
 		return errors.ErrServerInternal
 	}
 
 	// TODO: 暂时不做创建后动作
-	clusterIndexer.Set(req.Name, *cs)
+	ClusterIndexer.Set(req.Name, *cs)
 	return nil
 }
 
@@ -158,36 +203,46 @@ func (c *cluster) Update(ctx context.Context, cid int64, req *types.UpdateCluste
 
 // 删除前置检查
 // 开启集群删除保护，则不允许删除
-func (c *cluster) preDelete(ctx context.Context, cid int64) error {
-	o, err := c.factory.Cluster().Get(ctx, cid)
-	if err != nil {
+func (c *cluster) preDelete(ctx context.Context, cid int64) (cluster *model.Cluster, err error) {
+	if cluster, err = c.factory.Cluster().Get(ctx, cid); err != nil {
 		klog.Errorf("failed to get cluster(%d): %v", cid, err)
-		return err
+		return
 	}
-	if o == nil {
-		return errors.ErrClusterNotFound
+	if cluster == nil {
+		return nil, errors.ErrClusterNotFound
 	}
 	// 开启集群删除保护，则不允许删除
-	if o.Protected {
-		return errors.NewError(fmt.Errorf("已开启集群删除保护功能，不允许删除 %s", o.AliasName), http.StatusForbidden)
+	if cluster.Protected {
+		return nil, errors.NewError(fmt.Errorf("已开启集群删除保护功能，不允许删除 %s", cluster.AliasName),
+			http.StatusForbidden)
 	}
 
 	// TODO: 其他删除策略检查
-	return nil
+	return
 }
 
 func (c *cluster) Delete(ctx context.Context, cid int64) error {
-	if err := c.preDelete(ctx, cid); err != nil {
+	user, err := httputils.GetUserFromRequest(ctx)
+	if err != nil {
+		return errors.NewError(err, http.StatusInternalServerError)
+	}
+
+	cluster, err := c.preDelete(ctx, cid)
+	if err != nil {
 		return err
 	}
-	object, err := c.factory.Cluster().Delete(ctx, cid)
-	if err != nil {
+
+	var txFunc = func(cluster *model.Cluster) (err error) {
+		_, err = c.enforcer.RemoveNamedPolicy("p", user.Name, model.ObjectCluster.String(), cluster.GetSID())
+		return
+	}
+	if err := c.factory.Cluster().Delete(ctx, cluster, txFunc); err != nil {
 		klog.Errorf("failed to delete cluster(%d): %v", cid, err)
 		return errors.ErrServerInternal
 	}
 
 	// 从缓存中移除 clusterSet
-	clusterIndexer.Delete(object.Name)
+	ClusterIndexer.Delete(cluster.Name)
 	return nil
 }
 
@@ -204,14 +259,15 @@ func (c *cluster) Get(ctx context.Context, cid int64) (*types.Cluster, error) {
 }
 
 func (c *cluster) List(ctx context.Context) ([]types.Cluster, error) {
-	objects, err := c.factory.Cluster().List(ctx)
+	opts := ctrlutil.MakeDbOptions(ctx)
+	objects, err := c.factory.Cluster().List(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	var cs []types.Cluster
-	for _, object := range objects {
-		cs = append(cs, *c.model2Type(&object))
+	cs := make([]types.Cluster, len(objects))
+	for i, object := range objects {
+		cs[i] = *c.model2Type(&object)
 	}
 
 	return cs, nil
@@ -250,64 +306,6 @@ func (c *cluster) Protect(ctx context.Context, cid int64, req *types.ProtectClus
 	return nil
 }
 
-func (c *cluster) WsHandler(ctx context.Context, opt *types.WebShellOptions, w http.ResponseWriter, r *http.Request) error {
-	cs, err := c.GetClusterSetByName(ctx, opt.Cluster)
-	if err != nil {
-		klog.Errorf("failed to get cluster(%s) client set: %v", opt.Cluster, err)
-		return err
-	}
-
-	session, err := types.NewTerminalSession(w, r)
-	if err != nil {
-		return err
-	}
-	// 处理关闭
-	defer func() {
-		_ = session.Close()
-	}()
-	klog.Infof("connecting to %s/%s,", opt.Namespace, opt.Pod)
-
-	cmd := opt.Command
-	if len(cmd) == 0 {
-		cmd = "/bin/bash"
-	}
-
-	// 组装 POST 请求
-	req := cs.Client.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(opt.Pod).
-		Namespace(opt.Namespace).
-		SubResource("exec").
-		VersionedParams(&v1.PodExecOptions{
-			Container: opt.Container,
-			Command:   []string{cmd},
-			Stderr:    true,
-			Stdin:     true,
-			Stdout:    true,
-			TTY:       true,
-		}, scheme.ParameterCodec)
-
-	// remotecommand 主要实现了http 转 SPDY 添加X-Stream-Protocol-Version相关header 并发送请求
-	executor, err := remotecommand.NewSPDYExecutor(cs.Config, "POST", req.URL())
-	if err != nil {
-		return err
-	}
-	// 与 kubelet 建立 stream 连接
-	if err = executor.Stream(remotecommand.StreamOptions{
-		Stdout:            session,
-		Stdin:             session,
-		Stderr:            session,
-		TerminalSizeQueue: session,
-		Tty:               true,
-	}); err != nil {
-		_, _ = session.Write([]byte("exec pod command failed," + err.Error()))
-		// 标记关闭terminal
-		session.Done()
-	}
-
-	return nil
-}
-
 func (c *cluster) GetEventList(ctx context.Context, cluster string, options types.EventOptions) (*v1.EventList, error) {
 	if options.Limit == 0 {
 		options.Limit = 500
@@ -324,6 +322,123 @@ func (c *cluster) GetEventList(ctx context.Context, cluster string, options type
 	}
 
 	return clusterSet.Client.CoreV1().Events(options.Namespace).List(ctx, opt)
+}
+
+// WatchPodLog streams the logs of a pod in a cluster to a websocket connection.
+//
+// Parameters:
+// - ctx: The context.Context object for the request.
+// - cluster: The name of the cluster.
+// - namespace: The namespace of the pod.
+// - podName: The name of the pod.
+// - containerName: The name of the container.
+// - tailLine: The number of lines to show from the end of the logs.
+// - w: The http.ResponseWriter object for the websocket connection.
+// - r: The *http.Request object for the websocket connection.
+//
+// Returns:
+// - error: An error if there was a problem streaming the logs.
+func (c *cluster) WatchPodLog(ctx context.Context, cluster string, namespace string, podName string, containerName string, tailLine int64, w http.ResponseWriter, r *http.Request) error {
+	clusterSet, err := c.GetClusterSetByName(ctx, cluster)
+	if err != nil {
+		klog.Errorf("failed to get cluster(%s) clientSet: %v", cluster, err)
+		return err
+	}
+
+	req := clusterSet.Client.CoreV1().Pods(namespace).GetLogs(podName, &v1.PodLogOptions{
+		Container:  containerName,
+		Follow:     true,
+		TailLines:  &tailLine,
+		Timestamps: false,
+	})
+	if req == nil {
+		klog.Errorf("failed to get stream")
+		return fmt.Errorf("failed to get stream")
+	}
+
+	withTimeout, cancelFunc := context.WithTimeout(ctx, time.Minute*10)
+	defer cancelFunc()
+
+	reader, err := req.Stream(withTimeout)
+	if err != nil {
+		klog.Errorf("failed to get stream: %v", err)
+		return err
+	}
+	defer reader.Close()
+
+	conn, err := util.BuildWebSocketConnection(w, r)
+	if err != nil {
+		klog.Errorf("failed to build websocket connection: %v", err)
+		return err
+	}
+	defer conn.Close()
+
+	for {
+		buf := make([]byte, 1024)
+		n, err := reader.Read(buf)
+		if err != nil && err != io.EOF {
+			break
+		}
+		err = conn.WriteMessage(websocket.TextMessage, buf[0:n])
+		if err != nil {
+			klog.Errorf("failed to write message: %v ,this websocket connection will be closed", err)
+			break
+		}
+	}
+	return nil
+}
+
+const Retries = 3
+
+// ReRunJob 重新运行(创建)任务，通过先删除在创建的方式实现，极端情况下可能导致 job 丢失
+func (c *cluster) ReRunJob(ctx context.Context, cluster string, namespace string, jobName string, resourceVersion string) error {
+	cs, err := c.GetClusterSetByName(ctx, cluster)
+	if err != nil {
+		return err
+	}
+
+	job, err := cs.Client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if job.ResourceVersion != resourceVersion {
+		return fmt.Errorf("please apply your changes to the latest and re-run")
+	}
+
+	newJob := *job
+	// 重置不必要字段
+	newJob.ResourceVersion = ""
+	newJob.ObjectMeta.UID = ""
+	newJob.Status = batchv1.JobStatus{}
+	// 重置 uid 和 label
+	delete(newJob.Spec.Selector.MatchLabels, "controller-uid")
+	delete(newJob.Spec.Selector.MatchLabels, "batch.kubernetes.io/controller-uid")
+	delete(newJob.Spec.Template.ObjectMeta.Labels, "controller-uid")
+	delete(newJob.Spec.Template.ObjectMeta.Labels, "batch.kubernetes.io/controller-uid")
+	delete(newJob.Spec.Template.ObjectMeta.Labels, "batch.kubernetes.io/job-name")
+	delete(newJob.Spec.Template.ObjectMeta.Labels, "job-name")
+
+	// TODO: 备份一次job，避免失败job丢失
+	// 2. 删除job
+	if err = cs.Client.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to rerun job(%s) %v", jobName, err)
+	}
+
+	var jobErr error
+	// 3. 新建job，最多重试 3 次
+	for i := 0; i < Retries; i++ {
+		_, jobErr = cs.Client.BatchV1().Jobs(namespace).Create(ctx, &newJob, metav1.CreateOptions{})
+		if jobErr != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		break
+	}
+	if jobErr != nil {
+		return fmt.Errorf("failed to rerun job(%s) %v", jobName, err)
+	}
+
+	return nil
 }
 
 // AggregateEvents 聚合 k8s 资源的所有 events，比如 kind 为 deployment 时，则聚合 deployment，所属 rs 以及 pod 的事件
@@ -484,7 +599,7 @@ func (c *cluster) GetKubeConfigByName(ctx context.Context, name string) (*restcl
 
 // GetClusterSetByName 获取 ClusterSet， 缓存中不存在时，构建缓存再返回
 func (c *cluster) GetClusterSetByName(ctx context.Context, name string) (client.ClusterSet, error) {
-	cs, ok := clusterIndexer.Get(name)
+	cs, ok := ClusterIndexer.Get(name)
 	if ok {
 		klog.Infof("Get %s clusterSet from indexer", name)
 		return cs, nil
@@ -505,7 +620,7 @@ func (c *cluster) GetClusterSetByName(ctx context.Context, name string) (client.
 	}
 
 	klog.Infof("set %s clusterSet into indexer", name)
-	clusterIndexer.Set(name, *newClusterSet)
+	ClusterIndexer.Set(name, *newClusterSet)
 	return *newClusterSet, nil
 }
 
@@ -537,13 +652,34 @@ func (c *cluster) GetKubernetesMeta(ctx context.Context, clusterName string) (*t
 
 	// TODO: 并发优化
 	// 获取集群所有节点的资源数据，并做整合
-	metricList, err := clusterSet.Metric.NodeMetricses().List(ctx, metav1.ListOptions{})
+	//metricList, err := clusterSet.Metric.NodeMetricses().List(ctx, metav1.ListOptions{})
+	//if err != nil {
+	//	return nil, err
+	//}
+	//km.Resources = c.parseKubernetesResource(metricList.Items)
+
+	return &km, nil
+}
+
+func (c *cluster) GetKubernetesMetaFromPlan(ctx context.Context, planId int64) (*types.KubernetesMeta, error) {
+	planConfig, err := c.factory.Plan().GetConfigByPlan(ctx, planId)
 	if err != nil {
 		return nil, err
 	}
-	km.Resources = c.parseKubernetesResource(metricList.Items)
+	ks := &types.KubernetesSpec{}
+	if err = ks.Unmarshal(planConfig.Kubernetes); err != nil {
+		return nil, err
+	}
 
-	return &km, nil
+	nodes, err := c.factory.Plan().ListNodes(ctx, planId)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.KubernetesMeta{
+		KubernetesVersion: "v" + ks.KubernetesVersion,
+		Nodes:             len(nodes),
+	}, nil
 }
 
 // 构造事件的 FieldSelector， 如果参数为空则忽略
@@ -620,6 +756,12 @@ func parseFloat64FromString(s string) float64 {
 }
 
 func (c *cluster) model2Type(o *model.Cluster) *types.Cluster {
+	nodes := types.KubeNode{}
+	if err := nodes.Unmarshal(o.Nodes); err != nil {
+		// 非核心数据
+		klog.Warningf("failed to unmarshal cluster nodes: %v", err)
+	}
+
 	tc := &types.Cluster{
 		PixiuMeta: types.PixiuMeta{
 			Id:              o.Id,
@@ -629,28 +771,163 @@ func (c *cluster) model2Type(o *model.Cluster) *types.Cluster {
 			GmtCreate:   o.GmtCreate,
 			GmtModified: o.GmtModified,
 		},
-		Name:        o.Name,
-		AliasName:   o.AliasName,
-		ClusterType: o.ClusterType,
-		Protected:   o.Protected,
-		Description: o.Description,
+		Name:              o.Name,
+		AliasName:         o.AliasName,
+		ClusterType:       o.ClusterType,
+		KubernetesVersion: o.KubernetesVersion,
+		Nodes:             nodes,
+		PlanId:            o.PlanId,
+		Status:            o.ClusterStatus, // 默认是运行中状态，自建集群会根据实际任务状态修改状态
+		Protected:         o.Protected,
+		Description:       o.Description,
 	}
 
-	// 获取失败时，返回空的 kubernetes Meta, 不终止主流程
-	// TODO: 后续改成并发处理
-	kubernetesMeta, err := c.GetKubernetesMeta(context.TODO(), o.Name)
-	if err != nil {
-		klog.Warning("failed to get kubernetes Meta: %v", err)
-	} else {
-		tc.KubernetesMeta = *kubernetesMeta
-	}
+	//var (
+	//	kubernetesMeta *types.KubernetesMeta
+	//	err            error
+	//)
+	//
+	//if o.ClusterType == model.ClusterTypeStandard {
+	//	// 导入的集群通过API获取相关数据
+	//	// 获取失败时，返回空的 kubernetes Meta, 不终止主流程
+	//	// TODO: 后续改成并发处理
+	//	kubernetesMeta, err = c.GetKubernetesMeta(context.TODO(), o.Name)
+	//} else {
+	//	// 自建的集群通过plan配置获取版本信息
+	//	kubernetesMeta, err = c.GetKubernetesMetaFromPlan(context.TODO(), o.PlanId)
+	//
+	//	// 自建的集群需要从 plan task 获取状态
+	//	tc.Status, _ = c.GetClusterStatusFromPlanTask(o.PlanId)
+	//}
+	//if err != nil {
+	//	klog.Warning("failed to get kubernetes Meta: %v", err)
+	//} else {
+	//	tc.KubernetesMeta = *kubernetesMeta
+	//}
 
 	return tc
 }
 
-func NewCluster(cfg config.Config, f db.ShareDaoFactory) *cluster {
-	return &cluster{
-		cc:      cfg,
-		factory: f,
+func (c *cluster) GetClusterStatusFromPlanTask(planId int64) (model.ClusterStatus, error) {
+	status := model.ClusterStatusRunning
+
+	// 尝试获取最新的任务状态
+	// 获取失败也不中断返回
+	if tasks, err := c.factory.Plan().ListTasks(context.TODO(), planId); err == nil {
+		if len(tasks) == 0 {
+			status = model.ClusterStatusUnStart
+		} else {
+			for _, task := range tasks {
+				if task.Status != model.SuccessPlanStatus {
+					if task.Status == model.FailedPlanStatus {
+						status = model.ClusterStatusFailed
+					} else {
+						status = model.ClusterStatusDeploy
+					}
+					break
+				}
+			}
+		}
 	}
+
+	return status, nil
+}
+
+func (c *cluster) registerIndexers(informerResources ...InformerResource) {
+	for _, informerResource := range informerResources {
+		c.listerFuncs[informerResource.ResourceType] = informerResource.ListerFunc
+		c.getterFuncs[informerResource.ResourceType] = informerResource.GetterFunc
+	}
+}
+
+func (c *cluster) Run(ctx context.Context, workers int) error {
+	klog.Infof("starting cluster manager")
+	// 同步集群状态，节点数，版本
+	go wait.UntilWithContext(ctx, c.Sync, 5*time.Second)
+
+	return nil
+}
+
+func (c *cluster) Sync(ctx context.Context) {
+	// TODO: 后续添加同步任务
+}
+
+func NewCluster(cfg config.Config, f db.ShareDaoFactory, e *casbin.SyncedEnforcer) *cluster {
+	c := &cluster{
+		cc:       cfg,
+		factory:  f,
+		enforcer: e,
+
+		listerFuncs: make(map[string]listerFunc),
+		getterFuncs: make(map[string]getterFunc),
+	}
+
+	// TODO: code generation?
+	c.registerIndexers([]InformerResource{
+		{
+			ResourceType: ResourcePod,
+			ListerFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace string, listOption types.ListOptions) (interface{}, error) {
+				return c.ListPods(ctx, informer.PodsLister(), namespace, listOption)
+			},
+			GetterFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace, name string) (interface{}, error) {
+				return c.GetPod(ctx, informer.PodsLister(), namespace, name)
+			},
+		},
+		{
+			ResourceType: ResourceDeployment,
+			ListerFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace string, listOption types.ListOptions) (interface{}, error) {
+				return c.ListDeployments(ctx, informer.DeploymentsLister(), namespace, listOption)
+			},
+			GetterFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace, name string) (interface{}, error) {
+				return c.GetDeployment(ctx, informer.DeploymentsLister(), namespace, name)
+			},
+		},
+		{
+			ResourceType: ResourceStatefulSet,
+			ListerFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace string, listOption types.ListOptions) (interface{}, error) {
+				return c.ListStatefulSets(ctx, informer.StatefulSetsLister(), namespace, listOption)
+			},
+			GetterFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace, name string) (interface{}, error) {
+				return c.GetStatefulSet(ctx, informer.StatefulSetsLister(), namespace, name)
+			},
+		},
+		{
+			ResourceType: ResourceDaemonSet,
+			ListerFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace string, listOption types.ListOptions) (interface{}, error) {
+				return c.ListDaemonSets(ctx, informer.DaemonSetsLister(), namespace, listOption)
+			},
+			GetterFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace, name string) (interface{}, error) {
+				return c.GetDaemonSet(ctx, informer.DaemonSetsLister(), namespace, name)
+			},
+		},
+		{
+			ResourceType: ResourceCronJob,
+			ListerFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace string, listOption types.ListOptions) (interface{}, error) {
+				return c.ListCronJobs(ctx, informer.CronJobsLister(), namespace, listOption)
+			},
+			GetterFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace, name string) (interface{}, error) {
+				return c.GetCronJob(ctx, informer.CronJobsLister(), namespace, name)
+			},
+		},
+		{
+			ResourceType: ResourceJob,
+			ListerFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace string, listOption types.ListOptions) (interface{}, error) {
+				return c.ListJobs(ctx, informer.JobsLister(), namespace, listOption)
+			},
+			GetterFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace, name string) (interface{}, error) {
+				return c.GetJob(ctx, informer.JobsLister(), namespace, name)
+			},
+		},
+		{
+			ResourceType: ResourceNode,
+			ListerFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace string, listOption types.ListOptions) (interface{}, error) {
+				return c.ListNodes(ctx, informer.NodesLister(), namespace, listOption)
+			},
+			GetterFunc: func(ctx context.Context, informer *client.PixiuInformer, namespace, name string) (interface{}, error) {
+				return c.GetNode(ctx, informer.NodesLister(), namespace, name)
+			},
+		},
+		// TODO: 补充更多资源实现
+	}...)
+	return c
 }

@@ -66,6 +66,11 @@ func (t *planRouter) initRoutes(ginEngine *gin.Engine) {
 		// 执行指定任务
 		planRoute.POST("/:planId/tasks/:taskId", t.runTasks)
 		// 查询任务列表
-		planRoute.POST("/:planId/tasks", t.listTasks)
+		planRoute.GET("/:planId/tasks", t.listTasks)
+		// 实时查询任务进度
+		planRoute.GET("/:planId/tasks/:taskId/logs", t.watchTaskLog)
+
+		// 获取 os 与 os version
+		planRoute.GET("/distributions", t.getDistributions)
 	}
 }

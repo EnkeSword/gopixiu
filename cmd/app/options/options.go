@@ -21,6 +21,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/casbin/casbin/v2"
+	"github.com/casbin/casbin/v2/model"
+	gormadapter "github.com/casbin/gorm-adapter/v3"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cobra"
 	"gorm.io/driver/mysql"
@@ -29,7 +32,10 @@ import (
 
 	"github.com/caoyingjunz/pixiu/cmd/app/config"
 	"github.com/caoyingjunz/pixiu/pkg/controller"
-	"github.com/caoyingjunz/pixiu/pkg/db"
+	pixiudb "github.com/caoyingjunz/pixiu/pkg/db"
+	pixiuModel "github.com/caoyingjunz/pixiu/pkg/db/model"
+	"github.com/caoyingjunz/pixiu/pkg/jobmanager"
+	logutil "github.com/caoyingjunz/pixiu/pkg/util/log"
 	pixiuConfig "github.com/caoyingjunz/pixiulib/config"
 )
 
@@ -40,10 +46,13 @@ const (
 	defaultListen     = 8080
 	defaultTokenKey   = "pixiu"
 	defaultConfigFile = "/etc/pixiu/config.yaml"
-	defaultLogFormat  = config.LogFormatJson
+	defaultLogFormat  = logutil.LogFormatJson
 	defaultWorkDir    = "/etc/pixiu"
+	defaultStaticDir  = "/static"
 
 	defaultSlowSQLDuration = 1 * time.Second
+
+	rulesTableName = "rules"
 )
 
 // Options has all the params needed to run a pixiu
@@ -53,12 +62,18 @@ type Options struct {
 	HttpEngine      *gin.Engine
 
 	// 数据库接口
-	Factory db.ShareDaoFactory
+	db      *gorm.DB
+	Factory pixiudb.ShareDaoFactory
 	// 貔貅主控制接口
 	Controller controller.PixiuInterface
 
 	// ConfigFile is the location of the pixiu server's configuration file.
 	ConfigFile string
+
+	// Authorization enforcement and policy management
+	Enforcer *casbin.SyncedEnforcer
+
+	JobManager *jobmanager.Manager
 }
 
 func NewOptions() (*Options, error) {
@@ -100,17 +115,34 @@ func (o *Options) Complete() error {
 	if o.ComponentConfig.Worker.WorkDir == "" {
 		o.ComponentConfig.Worker.WorkDir = defaultWorkDir
 	}
+	if len(o.ComponentConfig.Default.StaticFiles) == 0 {
+		o.ComponentConfig.Default.StaticFiles = defaultStaticDir
+	}
+	if o.ComponentConfig.Audit.Schedule == "" {
+		o.ComponentConfig.Audit.Schedule = jobmanager.DefaultSchedule
+	}
+	if o.ComponentConfig.Audit.DaysReserved == 0 {
+		o.ComponentConfig.Audit.DaysReserved = jobmanager.DefaultDaysReserved
+	}
 
 	if err := o.ComponentConfig.Valid(); err != nil {
 		return err
 	}
+
+	o.ComponentConfig.Default.LogOptions.Init()
 
 	// 注册依赖组件
 	if err := o.register(); err != nil {
 		return err
 	}
 
-	o.Controller = controller.New(o.ComponentConfig, o.Factory)
+	o.Controller = controller.New(o.ComponentConfig, o.Factory, o.Enforcer)
+
+	o.JobManager = jobmanager.NewManager(
+		&o.ComponentConfig.Default.LogOptions,
+		jobmanager.NewAuditsCleaner(o.ComponentConfig.Audit, o.Factory),
+		jobmanager.NewClusterSyncer(o.Factory),
+	)
 	return nil
 }
 
@@ -126,7 +158,33 @@ func (o *Options) register() error {
 	}
 
 	// TODO: 注册其他依赖
+	if err := o.registerEnforcer(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// This panics if o.db is nil.
+func (o *Options) registerEnforcer() error {
+	// Casbin
+	a, err := gormadapter.NewAdapterByDBUseTableName(o.db, "", rulesTableName)
+	if err != nil {
+		return err
+	}
+
+	m, err := model.NewModelFromString(pixiuModel.RBACModel)
+	if err != nil {
+		return err
+	}
+
+	if o.Enforcer, err = casbin.NewSyncedEnforcer(m, a); err != nil {
+		return err
+	}
+
+	// Add an super admin policy.
+	_, err = o.Enforcer.AddPolicy(pixiuModel.AdminPolicy.Raw())
+	return err
 }
 
 func (o *Options) registerDatabase() error {
@@ -139,25 +197,24 @@ func (o *Options) registerDatabase() error {
 		sqlConfig.Name)
 
 	opt := &gorm.Config{
-		Logger: db.NewLogger(logger.Info, defaultSlowSQLDuration),
+		Logger: pixiudb.NewLogger(logger.Info, defaultSlowSQLDuration),
 	}
-	DB, err := gorm.Open(mysql.Open(dsn), opt)
+	db, err := gorm.Open(mysql.Open(dsn), opt)
 	if err != nil {
 		return err
 	}
+	o.db = db
+
 	// 设置数据库连接池
-	sqlDB, err := DB.DB()
+	sqlDB, err := db.DB()
 	if err != nil {
 		return err
 	}
 	sqlDB.SetMaxIdleConns(maxIdleConns)
 	sqlDB.SetMaxOpenConns(maxOpenConns)
 
-	o.Factory, err = db.NewDaoFactory(DB, o.ComponentConfig.Default.AutoMigrate)
-	if err != nil {
-		return err
-	}
-	return nil
+	o.Factory, err = pixiudb.NewDaoFactory(db, o.ComponentConfig.Default.AutoMigrate)
+	return err
 }
 
 // Validate validates all the required options.

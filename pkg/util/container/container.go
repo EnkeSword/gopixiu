@@ -19,6 +19,7 @@ package container
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -71,7 +72,7 @@ func (c *Container) StartAndWaitForContainer(ctx context.Context, image string) 
 		Binds: []string{fmt.Sprintf("%s/%d:/configs", c.dir, c.planId)},
 	}
 	netConfig := &network.NetworkingConfig{}
-	resp, err := c.client.ContainerCreate(ctx, config, hostConfig, netConfig, c.name)
+	resp, err := c.client.ContainerCreate(ctx, config, hostConfig, netConfig, nil, c.name)
 	if err != nil {
 		return err
 	}
@@ -183,4 +184,13 @@ func (c *Container) WaitContainer(ctx context.Context, containerId string, times
 	}
 
 	return fmt.Errorf("等待容器(%s)运行完成超时", containerId)
+}
+
+func (c *Container) WatchContainerLog(ctx context.Context, containerId, since string) (io.ReadCloser, error) {
+	return c.client.ContainerLogs(ctx, containerId, types.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+		Timestamps: false,
+	})
 }

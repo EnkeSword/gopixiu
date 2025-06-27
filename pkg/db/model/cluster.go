@@ -30,6 +30,16 @@ const (
 	ClusterTypeCustom                      // 自建集群
 )
 
+type ClusterStatus uint8
+
+const (
+	ClusterStatusRunning ClusterStatus = iota // 运行中
+	ClusterStatusDeploy                       // 部署中
+	ClusterStatusUnStart                      // 等待部署
+	ClusterStatusFailed                       // 部署失败
+	ClusterStatusError                        // 集群失联，API不可用
+)
+
 // Cluster kubernetes 集群信息
 type Cluster struct {
 	pixiu.Model
@@ -41,6 +51,17 @@ type Cluster struct {
 
 	// 0：标准集群 1: 自建集群
 	ClusterType `gorm:"type:tinyint" json:"cluster_type"`
+	// 自建集群关联的 PlanId
+	PlanId int64
+
+	// 集群运行状态 0: 运行中 1: 部署中 2: 等待部署 3: 部署失败 4: 运行中断 5: 所有的 node 不健康
+	ClusterStatus `gorm:"column:status;type:tinyint" json:"status"`
+
+	// 集群的版本
+	KubernetesVersion string `gorm:"type:varchar(255)" json:"kubernetes_version,omitempty"`
+
+	// 集群节点健康数，json 字符串
+	Nodes string `gorm:"type:text" json:"nodes"`
 
 	// 集群删除保护，开启集群删除保护时不允许删除集群
 	// 0: 关闭集群删除保护 1: 开启集群删除保护
@@ -51,9 +72,6 @@ type Cluster struct {
 
 	// 集群用途描述，可以为空
 	Description string `gorm:"type:text" json:"description"`
-
-	// 预留，扩展字段
-	Extension string `gorm:"type:text" json:"extension"`
 }
 
 func (*Cluster) TableName() string {

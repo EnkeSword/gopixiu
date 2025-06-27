@@ -48,7 +48,14 @@ func newHandlerTask(data TaskData) handlerTask {
 }
 
 func (p *plan) Run(ctx context.Context, workers int) error {
-	klog.Infof("Starting Plan Manager")
+	// 进程启动时，尝试同步任务状态
+	klog.Infof("starting to sync task manager")
+	if err := p.SyncTaskStatus(ctx); err != nil {
+		return err
+	}
+
+	// 启动部署计划控制器
+	klog.Infof("starting plan manager")
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, p.worker, time.Second)
 	}
@@ -128,6 +135,7 @@ func (p *plan) syncHandler(ctx context.Context, planId int64) {
 		BootStrap{handlerTask: task, dir: dir, runner: runner},
 		Deploy{handlerTask: task, dir: dir, runner: runner},
 		DeployNode{handlerTask: task},
+		Register{handlerTask: task, factory: p.factory},
 		DeployChart{handlerTask: task},
 	}
 	if err = p.syncTasks(handlers...); err != nil {
@@ -146,12 +154,11 @@ func (p *plan) createPlanTasksIfNotExist(tasks ...Handler) error {
 		if err == nil {
 			return nil
 		}
-		if err != nil {
-			// 非不存在报错则报异常
-			if !errors.IsRecordNotFound(err) {
-				klog.Infof("failed to get plan(%d) tasks(%s) for first created: %v", planId, name, err)
-				return err
-			}
+
+		// 非不存在报错则报异常
+		if !errors.IsRecordNotFound(err) {
+			klog.Infof("failed to get plan(%d) tasks(%s) for first created: %v", planId, name, err)
+			return err
 		}
 
 		// 不存在记录则新建
@@ -187,8 +194,24 @@ func (p *plan) GetRunner(osImage string) (string, error) {
 
 // 同步任务状态
 // 任务启动时设置为运行中，结束时同步为结束状态(成功或者失败)
-// TODO: 后续优化
-func (p *plan) syncStatus(planId int64) error {
+// TODO: 后续优化，判断对应部署容器是否在运行，根据容器的运行结果同步状态
+func (p *plan) syncStatus(ctx context.Context, planId int64) error {
+	tasks, err := p.factory.Plan().ListTasks(ctx, planId)
+	if err != nil {
+		return err
+	}
+
+	for _, task := range tasks {
+		if task.Status != model.RunningPlanStatus {
+			continue
+		}
+		if _, err = p.factory.Plan().UpdateTask(ctx, planId, task.Name, map[string]interface{}{
+			"status": model.FailedPlanStatus, "step": model.FailedPlanStep, "message": "服务异常修正，请重新启动部署计划", "gmt_modified": time.Now(),
+		}); err != nil {
+			klog.Errorf("failed to update plan(%d) status: %v", planId, err)
+			return err
+		}
+	}
 	return nil
 }
 
@@ -205,12 +228,14 @@ func (p *plan) syncTasks(tasks ...Handler) error {
 		klog.Infof("starting plan(%d) task(%s)", planId, name)
 
 		// TODO: 通过闭包方式优化
-		if err := p.factory.Plan().UpdateTask(context.TODO(), planId, name, map[string]interface{}{
-			"status": model.RunningPlanStatus, "message": "",
-		}); err != nil {
+		start, err := p.factory.Plan().UpdateTask(context.TODO(), planId, name, map[string]interface{}{
+			"status": model.RunningPlanStatus, "message": "", "gmt_create": time.Now(),
+		})
+		if err != nil {
 			klog.Errorf("failed to update plan(%d) status before run task(%s): %v", planId, name, err)
 			return err
 		}
+		taskC.SetByTask(planId, *start)
 
 		status := model.SuccessPlanStatus
 		step := task.Step()
@@ -225,12 +250,14 @@ func (p *plan) syncTasks(tasks ...Handler) error {
 		}
 
 		// 执行完成之后更新状态
-		if err := p.factory.Plan().UpdateTask(context.TODO(), planId, name, map[string]interface{}{
-			"status": status, "message": message, "step": step,
-		}); err != nil {
+		end, err := p.factory.Plan().UpdateTask(context.TODO(), planId, name, map[string]interface{}{
+			"status": status, "message": message, "step": step, "gmt_modified": time.Now(),
+		})
+		if err != nil {
 			klog.Errorf("failed to update plan(%d) status after run task(%s): %v", planId, name, err)
 			return err
 		}
+		taskC.SetByTask(planId, *end)
 
 		klog.Infof("completed plan(%d) task(%s)", planId, name)
 		if runErr != nil {

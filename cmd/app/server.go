@@ -87,27 +87,41 @@ func Run(opt *options.Options) error {
 		Handler: opt.HttpEngine,
 	}
 
-	// 启动部署计划
 	// TODO: 暂未设置优雅退出
-	if err := opt.Controller.Plan().Run(context.TODO(), 5); err != nil {
-		klog.Fatal("failed to listen pixiu server: ", err)
+	// 启动集群相关控制器
+	runers := []func(context.Context, int) error{opt.Controller.Plan().Run, opt.Controller.Cluster().Run}
+	for _, runner := range runers {
+		if err := runner(context.TODO(), 5); err != nil {
+			klog.Fatal("failed to start manager: ", err)
+		}
 	}
+
 	// 安装 http 路由
 	router.InstallRouters(opt)
 
 	// Initializing the server in a goroutine so that it won't block the graceful shutdown handling below
 	go func() {
-		klog.Infof("starting pixiu server")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if opt.ComponentConfig.TLS != nil {
+			klog.Info("starting pixiu server with TLS")
+			err = srv.ListenAndServeTLS(opt.ComponentConfig.TLS.CertFile, opt.ComponentConfig.TLS.KeyFile)
+		} else {
+			klog.Info("starting pixiu server with no TLS")
+			err = srv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			klog.Fatal("failed to listen pixiu server: ", err)
 		}
 	}()
+
+	klog.Info("starting job manager")
+	opt.JobManager.Run()
 
 	// Wait for interrupt signal to gracefully shut down the server with a timeout of 5 seconds.
 	quit := make(chan os.Signal)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	klog.Infof("shutting pixiu server down ...")
+	klog.Info("shutting pixiu server down ...")
 
 	// The context is used to inform the server it has 5 seconds to finish the request
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -116,6 +130,9 @@ func Run(opt *options.Options) error {
 	if err := srv.Shutdown(ctx); err != nil {
 		klog.Fatalf("pixiu server forced to shutdown: %v", err)
 	}
+
+	klog.Info("shutting job manager down ...")
+	opt.JobManager.Stop()
 
 	return nil
 }

@@ -19,15 +19,19 @@ package plan
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"sync"
 
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
 	"github.com/caoyingjunz/pixiu/api/server/errors"
 	"github.com/caoyingjunz/pixiu/cmd/app/config"
+	"github.com/caoyingjunz/pixiu/pkg/client"
 	"github.com/caoyingjunz/pixiu/pkg/db"
 	"github.com/caoyingjunz/pixiu/pkg/db/model"
 	"github.com/caoyingjunz/pixiu/pkg/types"
+	"github.com/caoyingjunz/pixiu/pkg/util/uuid"
 )
 
 type PlanGetter interface {
@@ -59,17 +63,21 @@ type Interface interface {
 	DeleteConfig(ctx context.Context, pid int64, cfgId int64) error
 	GetConfig(ctx context.Context, planId int64) (*types.PlanConfig, error)
 
-	// Run 启动 worker 处理协程
+	// Run 启动 plan worker 处理协程
 	Run(ctx context.Context, workers int) error
 
 	RunTask(ctx context.Context, planId int64, taskId int64) error
 	ListTasks(ctx context.Context, planId int64) ([]types.PlanTask, error)
+	WatchTasks(ctx context.Context, planId int64, w http.ResponseWriter, r *http.Request)
+	WatchTaskLog(ctx context.Context, planId int64, taskId int64, w http.ResponseWriter, r *http.Request) error
 }
 
 var taskQueue workqueue.RateLimitingInterface
+var taskC *client.Task
 
 func init() {
 	taskQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "tasks")
+	taskC = client.NewTaskCache()
 }
 
 type plan struct {
@@ -81,6 +89,8 @@ type plan struct {
 // 1. 创建部署计划
 // 2. 创建部署配置
 // 3. 创建节点列表
+// 4. 创建扩展组件
+// 5. 创建容器服务
 func (p *plan) Create(ctx context.Context, req *types.CreatePlanRequest) error {
 	object, err := p.factory.Plan().Create(ctx, &model.Plan{
 		Name:        req.Name,
@@ -106,6 +116,25 @@ func (p *plan) Create(ctx context.Context, req *types.CreatePlanRequest) error {
 		return errors.ErrServerInternal
 	}
 
+	// 如果启用pixiu注册功能，则创建容器服务
+	if req.Config.Kubernetes.Register {
+		kubeNode := types.KubeNode{Ready: []string{}, NotReady: []string{}}
+		nodes, _ := kubeNode.Marshal()
+		_, err := p.factory.Cluster().Create(ctx, &model.Cluster{
+			Name:        uuid.NewRandName(8),
+			AliasName:   req.Name,
+			Description: req.Description,
+			ClusterType: model.ClusterTypeCustom,
+			PlanId:      planId,
+			Protected:   true,
+			Nodes:       nodes,
+		})
+		if err != nil {
+			klog.Errorf("failed to register cluster for plan: %v", err)
+			_ = p.Delete(ctx, planId)
+			return errors.ErrServerInternal
+		}
+	}
 	return nil
 }
 
@@ -243,6 +272,34 @@ func (p *plan) List(ctx context.Context) ([]types.Plan, error) {
 	return ps, nil
 }
 
+func (p *plan) SyncTaskStatus(ctx context.Context) error {
+	plans, err := p.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(plans))
+	for _, planP := range plans {
+		wg.Add(1)
+		go func(planId int64) {
+			defer wg.Done()
+			if err = p.syncStatus(ctx, planId); err != nil {
+				errChan <- err
+			}
+		}(planP.Id)
+	}
+	wg.Wait()
+
+	select {
+	case err := <-errChan:
+		return err
+	default:
+	}
+
+	return nil
+}
+
 // 启动前校验
 // 1. 配置
 // 2. 节点
@@ -318,13 +375,21 @@ func (p *plan) Stop(ctx context.Context, pid int64) error {
 }
 
 func (p *plan) model2Type(o *model.Plan) (*types.Plan, error) {
-	step := model.UnStartedPlanStep
+	status := model.SuccessPlanStatus
 
 	// 尝试获取最新的任务状态
 	// 获取失败也不中断返回
-	newestTask, err := p.factory.Plan().GetNewestTask(context.TODO(), o.Id)
-	if err == nil {
-		step = newestTask.Step
+	if tasks, err := p.factory.Plan().ListTasks(context.TODO(), o.Id); err == nil {
+		if len(tasks) == 0 {
+			status = model.UnStartPlanStatus
+		} else {
+			for _, task := range tasks {
+				if task.Status != model.SuccessPlanStatus {
+					status = task.Status
+					break
+				}
+			}
+		}
 	}
 
 	return &types.Plan{
@@ -338,7 +403,7 @@ func (p *plan) model2Type(o *model.Plan) (*types.Plan, error) {
 		},
 		Name:        o.Name,
 		Description: o.Description,
-		Step:        step,
+		Step:        status,
 	}, nil
 }
 

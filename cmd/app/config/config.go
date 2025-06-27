@@ -16,32 +16,43 @@ limitations under the License.
 
 package config
 
-import "errors"
+import (
+	"fmt"
 
-type LogFormat string
-
-const (
-	LogFormatJson LogFormat = "json"
-	LogFormatText LogFormat = "text"
+	"github.com/caoyingjunz/pixiu/pkg/jobmanager"
+	logutil "github.com/caoyingjunz/pixiu/pkg/util/log"
 )
 
-var ErrInvalidLogFormat = errors.New("invalid log format")
+type Mode string
+
+const (
+	DebugMode   Mode = "debug"
+	ReleaseMode Mode = "release"
+)
+
+func (m Mode) InDebug() bool {
+	return m == DebugMode
+}
 
 type Config struct {
-	Default DefaultOptions `yaml:"default"`
-	Mysql   MysqlOptions   `yaml:"mysql"`
-	Worker  WorkerOptions  `yaml:"worker"`
+	Default DefaultOptions          `yaml:"default"`
+	Mysql   MysqlOptions            `yaml:"mysql"`
+	Worker  WorkerOptions           `yaml:"worker"`
+	Audit   jobmanager.AuditOptions `yaml:"audit"`
+	TLS     *TLS                    `yaml:"tls"`
 }
 
 type DefaultOptions struct {
-	Mode   string `yaml:"mode"`
+	Mode   Mode   `yaml:"mode"`
 	Listen int    `yaml:"listen"`
 	JWTKey string `yaml:"jwt_key"`
 
 	// 自动创建指定模型的数据库表结构，不会更新已存在的数据库表
 	AutoMigrate bool `yaml:"auto_migrate"`
 
-	LogOptions `yaml:",inline"`
+	logutil.LogOptions `yaml:",inline"`
+	// 静态文件路径
+	StaticFiles string `yaml:"static_files"`
 }
 
 func (o DefaultOptions) Valid() error {
@@ -65,19 +76,6 @@ func (o MysqlOptions) Valid() error {
 	return nil
 }
 
-type LogOptions struct {
-	LogFormat `yaml:"log_format"`
-}
-
-func (o LogOptions) Valid() error {
-	switch o.LogFormat {
-	case LogFormatJson, LogFormatText:
-		return nil
-	default:
-		return ErrInvalidLogFormat
-	}
-}
-
 type WorkerOptions struct {
 	WorkDir string   `yaml:"work_dir"`
 	Engines []Engine `yaml:"engines"`
@@ -93,6 +91,25 @@ func (w WorkerOptions) Valid() error {
 	return nil
 }
 
+type TLS struct {
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+}
+
+func (t *TLS) Valid() error {
+	if t != nil {
+		if len(t.CertFile) == 0 {
+			return fmt.Errorf("listen on tls, no cert_file found")
+		}
+
+		if len(t.KeyFile) == 0 {
+			return fmt.Errorf("listen on tls, no key_file found")
+		}
+	}
+
+	return nil
+}
+
 func (c *Config) Valid() (err error) {
 	if err = c.Default.Valid(); err != nil {
 		return
@@ -102,6 +119,9 @@ func (c *Config) Valid() (err error) {
 	}
 	if err = c.Worker.Valid(); err != nil {
 		return
+	}
+	if err = c.TLS.Valid(); err != nil {
+		return err
 	}
 
 	return

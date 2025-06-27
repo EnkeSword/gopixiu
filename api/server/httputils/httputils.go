@@ -18,14 +18,17 @@ package httputils
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
 	"github.com/caoyingjunz/pixiu/api/server/errors"
 	validatorutil "github.com/caoyingjunz/pixiu/api/server/validator"
+	"github.com/caoyingjunz/pixiu/pkg/db/model"
 )
 
 type Response struct {
@@ -71,6 +74,7 @@ func NewResponse() *Response {
 
 // SetSuccess 设置成功返回值
 func SetSuccess(c *gin.Context, r *Response) {
+	_ = contextBind(c).withResponseCode(http.StatusOK)
 	r.SetMessageWithCode("success", http.StatusOK)
 	c.JSON(http.StatusOK, r)
 }
@@ -79,21 +83,23 @@ func SetSuccess(c *gin.Context, r *Response) {
 func SetFailed(c *gin.Context, r *Response, err error) {
 	switch e := err.(type) {
 	case errors.Error:
-		SetFailedWithCode(c, r, e.Code, e)
+		setFailedWithCode(c, r, e.Code, e)
 	case validator.ValidationErrors:
-		SetFailedWithValidationError(c, r, validatorutil.TranslateError(e))
+		setFailedWithValidationError(c, r, validatorutil.TranslateError(e))
 	default:
-		SetFailedWithCode(c, r, http.StatusBadRequest, err)
+		setFailedWithCode(c, r, http.StatusBadRequest, err)
 	}
 }
 
 // SetFailedWithCode 设置错误返回值
-func SetFailedWithCode(c *gin.Context, r *Response, code int, err error) {
+func setFailedWithCode(c *gin.Context, r *Response, code int, err error) {
+	_ = contextBind(c).withResponseCode(code).withRawError(err)
 	r.SetMessageWithCode(err, code)
 	c.JSON(http.StatusOK, r)
 }
 
-func SetFailedWithValidationError(c *gin.Context, r *Response, e string) {
+func setFailedWithValidationError(c *gin.Context, r *Response, e string) {
+	_ = contextBind(c).withResponseCode(http.StatusBadRequest).withRawError(goerrors.New(e))
 	r.SetMessageWithCode(e, http.StatusBadRequest)
 	c.JSON(http.StatusOK, r)
 }
@@ -101,6 +107,7 @@ func SetFailedWithValidationError(c *gin.Context, r *Response, e string) {
 // AbortFailedWithCode 设置错误，code 返回值并终止请求
 func AbortFailedWithCode(c *gin.Context, code int, err error) {
 	r := NewResponse()
+	_ = contextBind(c).withResponseCode(code).withRawError(err)
 	r.SetMessageWithCode(err, code)
 	c.JSON(http.StatusOK, r)
 	c.Abort()
@@ -126,15 +133,118 @@ func ShouldBindAny(c *gin.Context, jsonObject interface{}, uriObject interface{}
 	return nil
 }
 
-func GetUserIdFromRequest(ctx context.Context) (int64, error) {
-	val := ctx.Value("userId")
+const userKey = "user"
+
+func GetUserFromRequest(ctx context.Context) (*model.User, error) {
+	val := ctx.Value(userKey)
 	if val == nil {
-		return 0, fmt.Errorf("get nil userId")
+		return nil, fmt.Errorf("get nil user")
 	}
 
-	userId, ok := val.(int64)
+	user, ok := val.(*model.User)
 	if !ok {
-		return 0, fmt.Errorf("invalid userId")
+		return nil, fmt.Errorf("failed to assert user")
 	}
-	return userId, nil
+	return user, nil
+}
+
+func GetUserIdFromContext(ctx context.Context) (int64, error) {
+	user, err := GetUserFromRequest(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return user.Id, nil
+}
+
+func SetUserToContext(c *gin.Context, user *model.User) {
+	c.Set(userKey, user)
+}
+
+func GetObjectFromRequest(c *gin.Context) (string, string, bool) {
+	return getObjectFromRequest(c.Request.URL.Path)
+}
+
+// getObjectFromRequest cuts and returns the object from the request path.
+// e.g. /pixiu/clusters/1 -> "clusters" "1" true
+func getObjectFromRequest(path string) (obj, sid string, ok bool) {
+	// must start with /
+	l := len(path)
+	if l == 0 || path[0] != '/' {
+		return
+	}
+	subs := strings.Split(path[1:l], "/")
+	l = len(subs)
+	if l < 2 || subs[0] != "pixiu" {
+		return
+	}
+	if l == 2 {
+		// e.g. /pixiu/clusters -> "clusters" "" true
+		return subs[1], "", subs[1] != ""
+	}
+	return subs[1], subs[2], subs[1] != "" && subs[2] != ""
+}
+
+const (
+	objIDsKey = "objIDs"
+)
+
+func SetIdRangeContext(c *gin.Context, ids []int64) {
+	c.Set(objIDsKey, ids)
+}
+
+func GetIdRangeFromListReq(ctx context.Context) (exists bool, ids []int64) {
+	val := ctx.Value(objIDsKey)
+	if val == nil {
+		return
+	}
+
+	ids, exists = val.([]int64)
+	return
+}
+
+const (
+	ResponseCodeKey = "response_code"
+	RawErrorKey     = "raw_error"
+)
+
+type ctxBind struct {
+	*gin.Context
+}
+
+func contextBind(c *gin.Context) *ctxBind {
+	return &ctxBind{c}
+}
+
+// withResponseCode puts the response code into the HTTP context.
+func (cb *ctxBind) withResponseCode(code int) *ctxBind {
+	cb.Set(ResponseCodeKey, code)
+	return cb
+}
+
+// withRawError puts the raw error into the HTTP context.
+func (cb *ctxBind) withRawError(err error) *ctxBind {
+	cb.Set(RawErrorKey, err)
+	return cb
+}
+
+// GetResponseCode gets the response code from the HTTP context.
+func GetResponseCode(ctx context.Context) (code int) {
+	val := ctx.Value(ResponseCodeKey)
+	if val == nil {
+		return
+	}
+
+	code = val.(int)
+	return
+}
+
+// GetRawError gets the raw error from the HTTP context.
+func GetRawError(ctx context.Context) (err error) {
+	val := ctx.Value(RawErrorKey)
+	if val == nil {
+		return
+	}
+
+	err = val.(error)
+	return
 }

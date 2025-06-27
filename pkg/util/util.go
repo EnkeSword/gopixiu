@@ -18,11 +18,12 @@ package util
 
 import (
 	"fmt"
-	"io/ioutil"
 	"math/rand"
+	"net/http"
 	"os"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -121,5 +122,47 @@ func EnsureDirectoryExists(path string) error {
 }
 
 func WriteToFile(filename string, data []byte) error {
-	return ioutil.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0600)
+}
+
+func BuildWebSocketConnection(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		}}
+	upgrader.Subprotocols = []string{r.Header.Get("Sec-WebSocket-Protocol")}
+	return upgrader.Upgrade(w, r, nil)
+}
+
+// DeduplicateIntSlice returns a new slice with duplicated elements removed.
+func DeduplicateIntSlice(s []int64) (ret []int64) {
+	ret = make([]int64, 0)
+	m := make(map[int64]struct{})
+	for _, v := range s {
+		if _, ok := m[v]; ok {
+			continue
+		}
+		m[v] = struct{}{}
+		ret = append(ret, v)
+	}
+
+	return
+}
+
+// More returns the larger one.
+func More(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// Less returns the smaller one.
+func Less(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

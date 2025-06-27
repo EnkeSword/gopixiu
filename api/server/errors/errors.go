@@ -39,6 +39,10 @@ func NewError(err error, code int) Error {
 }
 
 var (
+	ErrUnauthorized = Error{
+		Code: http.StatusUnauthorized,
+		Err:  errors.NoUserIdError,
+	}
 	ErrForbidden = Error{
 		Code: http.StatusForbidden,
 		Err:  errors.NoPermission,
@@ -82,5 +86,29 @@ var (
 	ErrTenantNotFound = Error{
 		Code: http.StatusNotFound,
 		Err:  errors.ErrTenantNotFound,
+	}
+	ErrAuditNotFound = Error{
+		Code: http.StatusNotFound,
+		Err:  errors.ErrAuditNotFound,
+	}
+	ErrAuditExists = Error{
+		Code: http.StatusConflict,
+		Err:  errors.ErrAuditExists,
+	}
+	ErrRBACPolicyExists = Error{
+		Code: http.StatusConflict,
+		Err:  errors.PolicyExistError,
+	}
+	ErrRBACPolicyNotFound = Error{
+		Code: http.StatusNotFound,
+		Err:  errors.PolicyNotExistError,
+	}
+	ErrGroupBindingExists = Error{
+		Code: http.StatusConflict,
+		Err:  errors.PolicyExistError,
+	}
+	ErrGroupBindingNotFound = Error{
+		Code: http.StatusNotFound,
+		Err:  errors.PolicyNotExistError,
 	}
 )

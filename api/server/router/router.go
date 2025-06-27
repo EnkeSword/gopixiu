@@ -17,6 +17,7 @@ limitations under the License.
 package router
 
 import (
+	"embed"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -28,22 +29,40 @@ import (
 	_ "github.com/caoyingjunz/pixiu/api/server/validator"
 
 	"github.com/caoyingjunz/pixiu/api/server/middleware"
+	"github.com/caoyingjunz/pixiu/api/server/router/audit"
+	"github.com/caoyingjunz/pixiu/api/server/router/auth"
 	"github.com/caoyingjunz/pixiu/api/server/router/cluster"
+	"github.com/caoyingjunz/pixiu/api/server/router/helm"
 	"github.com/caoyingjunz/pixiu/api/server/router/plan"
 	"github.com/caoyingjunz/pixiu/api/server/router/proxy"
 	"github.com/caoyingjunz/pixiu/api/server/router/tenant"
 	"github.com/caoyingjunz/pixiu/api/server/router/user"
 	"github.com/caoyingjunz/pixiu/cmd/app/options"
+	"github.com/caoyingjunz/pixiu/pkg/static"
 )
 
 type RegisterFunc func(o *options.Options)
 
+//go:embed static
+var EmbedFS embed.FS
+
 func InstallRouters(o *options.Options) {
 	fs := []RegisterFunc{
-		middleware.InstallMiddlewares, cluster.NewRouter, proxy.NewRouter, tenant.NewRouter, user.NewRouter, plan.NewRouter,
+		middleware.InstallMiddlewares,
+		cluster.NewRouter,
+		helm.NewRouter,
+		proxy.NewRouter,
+		tenant.NewRouter,
+		user.NewRouter,
+		plan.NewRouter,
+		audit.NewRouter,
+		auth.NewRouter,
 	}
 
 	install(o, fs...)
+
+	// StaticFiles 启用前端集成
+	o.HttpEngine.Use(static.Serve("/", static.LocalFile(o.ComponentConfig.Default.StaticFiles, true)))
 
 	// 启动健康检查
 	o.HttpEngine.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })

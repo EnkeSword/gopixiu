@@ -31,13 +31,13 @@ type PlanInterface interface {
 	Update(ctx context.Context, pid int64, resourceVersion int64, updates map[string]interface{}) error
 	Delete(ctx context.Context, pid int64) (*model.Plan, error)
 	Get(ctx context.Context, pid int64) (*model.Plan, error)
-	List(ctx context.Context) ([]model.Plan, error)
+	List(ctx context.Context, opts ...Options) ([]model.Plan, error)
 
 	CreatNode(ctx context.Context, object *model.Node) (*model.Node, error)
 	UpdateNode(ctx context.Context, nodeId int64, resourceVersion int64, updates map[string]interface{}) error
 	DeleteNode(ctx context.Context, nodeId int64) (*model.Node, error)
 	GetNode(ctx context.Context, nodeId int64) (*model.Node, error)
-	ListNodes(ctx context.Context, pid int64) ([]model.Node, error)
+	ListNodes(ctx context.Context, pid int64, opts ...Options) ([]model.Node, error)
 
 	DeleteNodesByPlan(ctx context.Context, planId int64) error
 	GetNodeByName(ctx context.Context, planId int64, name string) (*model.Node, error)
@@ -48,18 +48,19 @@ type PlanInterface interface {
 	UpdateConfig(ctx context.Context, cfgId int64, resourceVersion int64, updates map[string]interface{}) error
 	DeleteConfig(ctx context.Context, cfgId int64) (*model.Config, error)
 	GetConfig(ctx context.Context, cfgId int64) (*model.Config, error)
-	ListConfigs(ctx context.Context) ([]model.Config, error)
+	ListConfigs(ctx context.Context, opts ...Options) ([]model.Config, error)
 
 	DeleteConfigByPlan(ctx context.Context, planId int64) error
 	GetConfigByPlan(ctx context.Context, planId int64) (*model.Config, error)
 
 	CreatTask(ctx context.Context, object *model.Task) (*model.Task, error)
-	UpdateTask(ctx context.Context, pid int64, name string, updates map[string]interface{}) error
+	UpdateTask(ctx context.Context, pid int64, name string, updates map[string]interface{}) (*model.Task, error)
 	DeleteTask(ctx context.Context, pid int64) error
-	ListTasks(ctx context.Context, pid int64) ([]model.Task, error)
+	ListTasks(ctx context.Context, pid int64, opts ...Options) ([]model.Task, error)
 
 	GetNewestTask(ctx context.Context, pid int64) (*model.Task, error)
 	GetTaskByName(ctx context.Context, planId int64, name string) (*model.Task, error)
+	GetTaskById(ctx context.Context, taskId int64) (*model.Task, error)
 }
 
 type plan struct {
@@ -115,9 +116,13 @@ func (p *plan) Get(ctx context.Context, pid int64) (*model.Plan, error) {
 	return &object, nil
 }
 
-func (p *plan) List(ctx context.Context) ([]model.Plan, error) {
+func (p *plan) List(ctx context.Context, opts ...Options) ([]model.Plan, error) {
 	var objects []model.Plan
-	if err := p.db.WithContext(ctx).Find(&objects).Error; err != nil {
+	tx := p.db.WithContext(ctx)
+	for _, opt := range opts {
+		tx = opt(tx)
+	}
+	if err := tx.Find(&objects).Error; err != nil {
 		return nil, err
 	}
 
@@ -197,9 +202,13 @@ func (p *plan) GetNode(ctx context.Context, nodeId int64) (*model.Node, error) {
 	return &object, nil
 }
 
-func (p *plan) ListNodes(ctx context.Context, pid int64) ([]model.Node, error) {
+func (p *plan) ListNodes(ctx context.Context, pid int64, opts ...Options) ([]model.Node, error) {
 	var objects []model.Node
-	if err := p.db.WithContext(ctx).Where("plan_id = ?", pid).Find(&objects).Error; err != nil {
+	tx := p.db.WithContext(ctx).Where("plan_id = ?", pid)
+	for _, opt := range opts {
+		tx = opt(tx)
+	}
+	if err := tx.Find(&objects).Error; err != nil {
 		return nil, err
 	}
 
@@ -261,9 +270,13 @@ func (p *plan) GetConfig(ctx context.Context, cid int64) (*model.Config, error) 
 	return &object, nil
 }
 
-func (p *plan) ListConfigs(ctx context.Context) ([]model.Config, error) {
+func (p *plan) ListConfigs(ctx context.Context, opts ...Options) ([]model.Config, error) {
 	var objects []model.Config
-	if err := p.db.WithContext(ctx).Find(&objects).Error; err != nil {
+	tx := p.db.WithContext(ctx)
+	for _, opt := range opts {
+		tx = opt(tx)
+	}
+	if err := tx.Find(&objects).Error; err != nil {
 		return nil, err
 	}
 
@@ -290,18 +303,16 @@ func (p *plan) CreatTask(ctx context.Context, object *model.Task) (*model.Task, 
 	return object, nil
 }
 
-func (p *plan) UpdateTask(ctx context.Context, pid int64, name string, updates map[string]interface{}) error {
-	// 系统维护字段
-	updates["gmt_modified"] = time.Now()
+func (p *plan) UpdateTask(ctx context.Context, pid int64, name string, updates map[string]interface{}) (*model.Task, error) {
 	f := p.db.WithContext(ctx).Model(&model.Task{}).Where("plan_id = ? and name = ?", pid, name).Updates(updates)
 	if f.Error != nil {
-		return f.Error
+		return nil, f.Error
 	}
 	if f.RowsAffected == 0 {
-		return errors.ErrRecordNotFound
+		return nil, errors.ErrRecordNotFound
 	}
 
-	return nil
+	return p.GetTaskByName(ctx, pid, name)
 }
 
 func (p *plan) DeleteTask(ctx context.Context, pid int64) error {
@@ -312,9 +323,13 @@ func (p *plan) DeleteTask(ctx context.Context, pid int64) error {
 	return nil
 }
 
-func (p *plan) ListTasks(ctx context.Context, pid int64) ([]model.Task, error) {
+func (p *plan) ListTasks(ctx context.Context, pid int64, opts ...Options) ([]model.Task, error) {
 	var objects []model.Task
-	if err := p.db.WithContext(ctx).Where("plan_id = ?", pid).Find(&objects).Error; err != nil {
+	tx := p.db.WithContext(ctx).Where("plan_id = ?", pid)
+	for _, opt := range opts {
+		tx = opt(tx)
+	}
+	if err := tx.Find(&objects).Error; err != nil {
 		return nil, err
 	}
 
@@ -331,6 +346,15 @@ func (p *plan) GetNewestTask(ctx context.Context, pid int64) (*model.Task, error
 		return nil, errors.ErrRecordNotFound
 	}
 	return &objects[0], nil
+}
+
+func (p *plan) GetTaskById(ctx context.Context, taskId int64) (*model.Task, error) {
+	var object model.Task
+	if err := p.db.WithContext(ctx).Where("id = ?", taskId).First(&object).Error; err != nil {
+		return nil, err
+	}
+
+	return &object, nil
 }
 
 func (p *plan) GetTaskByName(ctx context.Context, planId int64, name string) (*model.Task, error) {

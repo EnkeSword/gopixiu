@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/casbin/casbin/v2"
 	"k8s.io/klog/v2"
 
 	"github.com/caoyingjunz/pixiu/api/server/errors"
@@ -67,8 +68,9 @@ type Interface interface {
 }
 
 type user struct {
-	cc      config.Config
-	factory db.ShareDaoFactory
+	cc       config.Config
+	factory  db.ShareDaoFactory
+	enforcer *casbin.SyncedEnforcer
 }
 
 func (u *user) Create(ctx context.Context, req *types.CreateUserRequest) error {
@@ -84,7 +86,16 @@ func (u *user) Create(ctx context.Context, req *types.CreateUserRequest) error {
 		return errors.ErrServerInternal
 	}
 	if object != nil {
-		return errors.ErrUserExists
+		err = errors.ErrUserExists // 记录错误
+		return err
+	}
+
+	txFunc := func() (err error) {
+		if req.Role == model.RoleRoot {
+			bindings := model.NewGroupBinding(req.Name, model.AdminGroup)
+			_, err = u.enforcer.AddGroupingPolicy(bindings.Raw())
+		}
+		return
 	}
 
 	if _, err = u.factory.User().Create(ctx, &model.User{
@@ -94,7 +105,7 @@ func (u *user) Create(ctx context.Context, req *types.CreateUserRequest) error {
 		Role:        req.Role,
 		Email:       req.Email,
 		Description: req.Description,
-	}); err != nil {
+	}, txFunc); err != nil {
 		klog.Errorf("failed to create user %s: %v", req.Name, err)
 		return errors.ErrServerInternal
 	}
@@ -156,7 +167,7 @@ func (u *user) UpdatePassword(ctx context.Context, userId int64, req *types.Upda
 		return errors.ErrDuplicatedPassword
 	}
 
-	operatorId, err := httputils.GetUserIdFromRequest(ctx)
+	operatorId, err := httputils.GetUserIdFromContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -289,6 +300,7 @@ func (u *user) Login(ctx context.Context, req *types.LoginRequest) (*types.Login
 		UserName: object.Name,
 		Token:    token,
 		Role:     object.Role,
+		User:     object,
 	}, nil
 }
 
@@ -333,9 +345,10 @@ func model2Type(o *model.User) *types.User {
 	}
 }
 
-func NewUser(cfg config.Config, f db.ShareDaoFactory) *user {
+func NewUser(cfg config.Config, f db.ShareDaoFactory, e *casbin.SyncedEnforcer) *user {
 	return &user{
-		cc:      cfg,
-		factory: f,
+		cc:       cfg,
+		factory:  f,
+		enforcer: e,
 	}
 }

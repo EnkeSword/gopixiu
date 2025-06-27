@@ -23,6 +23,12 @@ import (
 	"github.com/caoyingjunz/pixiu/pkg/controller"
 )
 
+const (
+	kubeProxyBaseURL = "/pixiu/kubeproxy"
+	helmBaseURL      = "/pixiu/helms"
+	indexerBaseURL   = "/pixiu/indexer"
+)
+
 // clusterRouter is a router to talk with the cluster controller
 type clusterRouter struct {
 	c controller.PixiuInterface
@@ -53,21 +59,30 @@ func (cr *clusterRouter) initRoutes(httpEngine *gin.Engine) {
 	}
 
 	// 调用 kubernetes 对象
-	kubeRoute := httpEngine.Group("/pixiu/kubeproxy")
+	kubeRoute := httpEngine.Group(kubeProxyBaseURL)
 	{
+		// 获取指定对象的日志
+		kubeRoute.GET("/clusters/:cluster/namespaces/:namespace/pods/:pod/log", cr.watchPodLog)
 		// Deprecated 聚合 events
 		kubeRoute.GET("/clusters/:cluster/namespaces/:namespace/name/:name/kind/:kind/events", cr.aggregateEvents)
 		// 获取指定对象的 events，支持事件聚合
 		kubeRoute.GET("/clusters/:cluster/api/v1/events", cr.getEventList)
 
-		// ws
+		// pod ws
 		kubeRoute.GET("/ws", cr.webShell)
+		// node ws
+		kubeRoute.GET("/nodes/ws", cr.nodeWebShell)
+		// 重启Job action=rerun
+		kubeRoute.POST("/clusters/:cluster/namespaces/:namespace/jobs/:name", cr.ReRunJob)
 	}
 
-	// 调用 helm 对象
-	helmRoute := httpEngine.Group("/pixiu/helms")
+	// 从 pixiu 缓存中获取 kubernetes 对象
+	indexerRoute := httpEngine.Group(indexerBaseURL)
 	{
-		// 获取 release 列表
-		helmRoute.GET("/clusters/:cluster/v1/namespaces/:namespace/releases", cr.ListReleases)
+		// 从缓存中获取指定对象
+		indexerRoute.GET("/clusters/:cluster/resources/:resource/namespaces/:namespace/name/:name", cr.getIndexerResource)
+		// 从缓存中获取对象列表
+		indexerRoute.GET("/clusters/:cluster/resources/:resource/namespaces/:namespace", cr.listIndexerResources)
 	}
+
 }
